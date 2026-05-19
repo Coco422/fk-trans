@@ -185,7 +185,7 @@ pub fn run() {
             let _ = gs.on_shortcut(shortcut, move |app_handle, _shortcut, _event| {
                 let app = app_handle.clone();
                 let cm = shortcut_cm.clone();
-                tokio::spawn(run_translation_pipeline(app, cm));
+                tauri::async_runtime::spawn(run_translation_pipeline(app, cm));
             });
 
             Ok(())

@@ -5,6 +5,8 @@ pub struct ClaudeProvider {
     base_url: String,
     api_key: String,
     model: String,
+    system_prompt: String,
+    user_prompt: String,
     client: Client,
 }
 
@@ -14,19 +16,37 @@ impl Default for ClaudeProvider {
             base_url: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             model: "claude-haiku-4-5-20251001".to_string(),
+            system_prompt: "You are a translator. Translate the following text from {from} to {to}. Output ONLY the translation, nothing else.".to_string(),
+            user_prompt: "{text}".to_string(),
             client: Client::new(),
         }
     }
 }
 
 impl ClaudeProvider {
-    pub fn new(base_url: &str, api_key: &str, model: &str) -> Self {
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Self {
         Self {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             model: model.to_string(),
+            system_prompt: system_prompt.to_string(),
+            user_prompt: user_prompt.to_string(),
             client: Client::new(),
         }
+    }
+
+    fn format_prompt(template: &str, from: &str, to: &str, text: &str) -> String {
+        let from_label = if from == "auto" { "the detected language" } else { from };
+        template
+            .replace("{from}", from_label)
+            .replace("{to}", to)
+            .replace("{text}", text)
     }
 }
 
@@ -44,18 +64,15 @@ impl TranslateProvider for ClaudeProvider {
             ));
         }
 
-        let prompt = format!(
-            "Translate the following text from {} to {}. Output ONLY the translation.\n\n{}",
-            if from == "auto" { "the detected language" } else { from },
-            to,
-            text
-        );
+        let system_content = Self::format_prompt(&self.system_prompt, from, to, text);
+        let user_content = Self::format_prompt(&self.user_prompt, from, to, text);
 
         let body = serde_json::json!({
             "model": self.model,
             "max_tokens": 2048,
+            "system": system_content,
             "messages": [
-                { "role": "user", "content": prompt }
+                { "role": "user", "content": user_content }
             ]
         });
 

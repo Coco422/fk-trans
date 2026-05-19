@@ -41,7 +41,6 @@ pub async fn update_config(
         config.clone()
     };
 
-    // Rebuild engine if active provider changed
     if updates.get("active_provider").is_some() {
         let mut engine = state.translation_engine.write().await;
         engine.set_active_provider(&result.active_provider);
@@ -56,6 +55,9 @@ pub async fn update_provider(
     base_url: String,
     api_key: String,
     model: String,
+    system_prompt: Option<String>,
+    user_prompt: Option<String>,
+    extra_params: Option<serde_json::Value>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let provider_cfg = {
@@ -65,12 +67,24 @@ pub async fn update_provider(
             p.base_url = base_url;
             p.api_key = api_key;
             p.model = model;
+            if let Some(sp) = system_prompt {
+                p.system_prompt = sp;
+            }
+            if let Some(up) = user_prompt {
+                p.user_prompt = up;
+            }
+            if let Some(ep) = extra_params {
+                p.extra_params = ep;
+            }
         } else {
             config.providers.push(ProviderConfig {
                 name: name.clone(),
                 base_url,
                 api_key,
                 model,
+                system_prompt: system_prompt.unwrap_or_else(config::default_system_prompt),
+                user_prompt: user_prompt.unwrap_or_else(config::default_user_prompt),
+                extra_params: extra_params.unwrap_or_default(),
             });
         }
 
@@ -78,7 +92,6 @@ pub async fn update_provider(
         config.providers.iter().find(|p| p.name == name).unwrap().clone()
     };
 
-    // Rebuild this provider in the engine
     let mut engine = state.translation_engine.write().await;
     engine.reload_provider(&provider_cfg);
 
@@ -106,20 +119,29 @@ pub async fn test_provider(
             &provider_config.base_url,
             &provider_config.api_key,
             &provider_config.model,
+            &provider_config.system_prompt,
+            &provider_config.user_prompt,
+            provider_config.extra_params.clone(),
         )),
         "gemini" => Arc::new(GeminiProvider::new(
             &provider_config.base_url,
             &provider_config.api_key,
             &provider_config.model,
+            &provider_config.system_prompt,
+            &provider_config.user_prompt,
         )),
         "claude" => Arc::new(ClaudeProvider::new(
             &provider_config.base_url,
             &provider_config.api_key,
             &provider_config.model,
+            &provider_config.system_prompt,
+            &provider_config.user_prompt,
         )),
         "ollama" => Arc::new(OllamaProvider::new(
             &provider_config.base_url,
             &provider_config.model,
+            &provider_config.system_prompt,
+            &provider_config.user_prompt,
         )),
         "custom_http" => Arc::new(CustomHttpProvider::new(
             &provider_config.base_url,
