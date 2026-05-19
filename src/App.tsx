@@ -1,5 +1,6 @@
-import { createSignal, createResource, For, Show } from "solid-js";
+import { createSignal, createResource, For, Show, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 interface ProviderConfig {
   name: string;
@@ -60,6 +61,16 @@ export default function App() {
   const [activeTab, setActiveTab] = createSignal<
     "general" | "providers" | "history"
   >("general");
+
+  onMount(async () => {
+    const unlisten = await listen("config-changed", async () => {
+      try {
+        const updated = await invoke<AppConfig>("get_config");
+        mutate(updated);
+      } catch {}
+    });
+    onCleanup(unlisten);
+  });
 
   async function loadHistory() {
     try {

@@ -26,5 +26,5 @@ export interface AppConfig {
   source_lang: string;
   target_lang: string;
   active_provider: string;
-  providers: Record<string, ProviderConfig | null>;
+  providers: ProviderConfig[];
 }

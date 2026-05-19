@@ -1,11 +1,17 @@
 use tauri::{
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    menu::{MenuBuilder, MenuItemBuilder},
+    menu::{MenuBuilder, MenuItemBuilder, CheckMenuItemBuilder},
 };
+use crate::AppState;
+use crate::config;
 
 pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    let enable_item = MenuItemBuilder::with_id("enable", "Enable fk-trans")
+    let state = app.state::<AppState>();
+    let is_enabled = state.config.lock().unwrap().enabled;
+
+    let enable_item = CheckMenuItemBuilder::with_id("enable", "Enable fk-trans")
+        .checked(is_enabled)
         .build(app)?;
     let settings_item = MenuItemBuilder::with_id("settings", "Settings...")
         .build(app)?;
@@ -24,7 +30,17 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .menu(&menu)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "enable" => {
-                log::info!("Toggle enable");
+                let state = app.state::<AppState>();
+                let mut config = state.config.lock().unwrap();
+                config.enabled = !config.enabled;
+                let new_state = config.enabled;
+                config::save_config(&config);
+                drop(config);
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit("config-changed", ());
+                }
+                let _ = enable_item.set_checked(new_state);
+                log::info!("fk-trans {}", if new_state { "enabled" } else { "disabled" });
             }
             "settings" => {
                 if let Some(window) = app.get_webview_window("main") {
