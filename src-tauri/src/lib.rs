@@ -182,11 +182,16 @@ pub fn run() {
             let shortcut_cm = clipboard_manager.clone();
             let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyT);
             let gs = app.global_shortcut();
-            let _ = gs.on_shortcut(shortcut, move |app_handle, _shortcut, _event| {
+            match gs.on_shortcut(shortcut, move |app_handle, _shortcut, _event| {
+                eprintln!("[shortcut] *** Cmd+Shift+T pressed! ***");
+                log::info!("[shortcut] Cmd+Shift+T triggered");
                 let app = app_handle.clone();
                 let cm = shortcut_cm.clone();
                 tauri::async_runtime::spawn(run_translation_pipeline(app, cm));
-            });
+            }) {
+                Ok(_) => log::info!("[shortcut] Cmd+Shift+T registered successfully"),
+                Err(e) => log::error!("[shortcut] Failed to register Cmd+Shift+T: {}", e),
+            }
 
             Ok(())
         })
