@@ -18,18 +18,20 @@ impl MouseListener {
         running.store(true, Ordering::SeqCst);
 
         std::thread::spawn(move || {
+            log::info!("Mouse listener starting...");
             let callback = move |event: Event| {
                 if !running.load(Ordering::SeqCst) {
                     return;
                 }
 
                 if let EventType::ButtonPress(Button::Middle) = event.event_type {
+                    log::info!("Middle-click detected, triggering translation");
                     let _ = tx.send(());
                 }
             };
 
             if let Err(e) = listen(callback) {
-                log::error!("Mouse listener error: {:?}", e);
+                log::error!("Mouse listener error (check Accessibility permissions): {:?}", e);
             }
         });
     }

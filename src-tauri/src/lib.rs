@@ -160,13 +160,14 @@ pub fn run() {
             let app_handle_clone = app_handle.clone();
             let clipboard_clone = clipboard_manager.clone();
 
-            tauri::async_runtime::spawn(async move {
+            // Use a dedicated thread for receiving to avoid blocking tokio runtime
+            std::thread::spawn(move || {
                 loop {
                     match rx.recv() {
                         Ok(()) => {
                             let app = app_handle_clone.clone();
                             let cm = clipboard_clone.clone();
-                            tokio::spawn(run_translation_pipeline(app, cm));
+                            tauri::async_runtime::spawn(run_translation_pipeline(app, cm));
                         }
                         Err(e) => {
                             log::error!("Channel error: {}", e);
