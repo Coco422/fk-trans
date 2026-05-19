@@ -22,30 +22,38 @@ pub struct AppState {
 
 /// Shared translation pipeline: capture clipboard, translate, show popup.
 async fn run_translation_pipeline(app: tauri::AppHandle, cm: Arc<clipboard::manager::ClipboardManager>) {
+    log::info!("[pipeline] Translation pipeline triggered");
+
     // Check if enabled
     {
         let state = app.state::<AppState>();
         let config = state.config.lock().unwrap();
         if !config.enabled {
+            log::info!("[pipeline] Disabled, skipping");
             return;
         }
     }
 
     // Show popup immediately at cursor position with loading state
     let pos = mouse::cursor::get_cursor_position();
+    log::info!("[pipeline] Cursor at ({}, {}), showing popup", pos.x, pos.y);
     if let Some(window) = app.get_webview_window("popup") {
         let _ = window.set_position(tauri::Position::Logical(
             tauri::LogicalPosition::new(pos.x, pos.y),
         ));
         let _ = window.show();
-        let _ = window.set_focus();
     }
     let _ = app.emit("translation-started", ());
 
     // Capture selected text
+    log::info!("[pipeline] Capturing selected text...");
     let text = match cm.capture_selected_text().await {
-        Some(t) => t,
+        Some(t) => {
+            log::info!("[pipeline] Captured text: {} chars", t.len());
+            t
+        }
         None => {
+            log::warn!("[pipeline] No text captured, hiding popup");
             if let Some(window) = app.get_webview_window("popup") {
                 let _ = window.hide();
             }
@@ -93,7 +101,9 @@ async fn run_translation_pipeline(app: tauri::AppHandle, cm: Arc<clipboard::mana
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::init();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info")
+    ).init();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())

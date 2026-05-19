@@ -52,24 +52,12 @@ export default function FloatingPopup() {
 
     document.addEventListener("keydown", handleKeydown);
 
-    // Hide on blur (click outside)
-    const blurHandler = () => {
-      // Small delay to allow button clicks to register
-      setTimeout(() => {
-        if (!document.hasFocus()) {
-          win.hide();
-        }
-      }, 150);
-    };
-    window.addEventListener("blur", blurHandler);
-
     onCleanup(() => {
       unlisten();
       unlistenLoading();
       unlistenError();
       unlistenBlur();
       document.removeEventListener("keydown", handleKeydown);
-      window.removeEventListener("blur", blurHandler);
       if (hideTimeout) clearTimeout(hideTimeout);
     });
   });
