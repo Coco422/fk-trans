@@ -145,7 +145,7 @@ export default function FloatingPopup() {
       </Show>
 
       {/* Translation result */}
-      <Show when={data() && !error()}>
+      <Show when={data()}>
         {(payload) => (
           <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 p-4 w-[380px] animate-fade-in">
             {/* Language pair + provider */}
