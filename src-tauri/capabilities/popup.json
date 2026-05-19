@@ -5,6 +5,8 @@
   "windows": ["popup"],
   "permissions": [
     "core:default",
+    "core:window:allow-hide",
+    "core:window:allow-start-dragging",
     "clipboard-manager:allow-read-text"
   ]
 }

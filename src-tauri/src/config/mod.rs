@@ -56,7 +56,9 @@ impl Default for AppConfig {
                     model: "qwen3.6-27b".into(),
                     system_prompt: default_system_prompt(),
                     user_prompt: default_user_prompt(),
-                    extra_params: serde_json::json!({"enable_thinking": false}),
+                    extra_params: serde_json::json!({
+                        "chat_template_kwargs": { "enable_thinking": false }
+                    }),
                 },
                 ProviderConfig {
                     name: "gemini".into(),

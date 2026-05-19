@@ -1,6 +1,8 @@
 export interface TranslateResult {
   original: string;
   translated: string;
+  sourceLang?: string;
+  targetLang?: string;
   source_lang: string;
   target_lang: string;
   provider: string;

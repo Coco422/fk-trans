@@ -3,21 +3,22 @@ use enigo::{
     Direction::{Click, Press, Release},
     Enigo, Key, Keyboard, Settings,
 };
-use std::sync::Mutex;
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
+use uuid::Uuid;
 
 pub struct ClipboardManager {
-    previous_text: Mutex<String>,
+    capture_lock: tokio::sync::Mutex<()>,
 }
 
 impl ClipboardManager {
     pub fn new() -> Self {
         Self {
-            previous_text: Mutex::new(String::new()),
+            capture_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     pub async fn capture_selected_text(&self) -> Option<String> {
+        let _guard = self.capture_lock.lock().await;
         eprintln!("[clipboard] Starting capture...");
 
         // Save current clipboard content
@@ -31,7 +32,16 @@ impl ClipboardManager {
             };
             cb.get_text().unwrap_or_default()
         };
-        eprintln!("[clipboard] Original clipboard saved ({} chars)", original_clipboard.len());
+        eprintln!(
+            "[clipboard] Original clipboard saved ({} chars)",
+            original_clipboard.len()
+        );
+
+        let sentinel = format!("__fk_trans_capture_{}__", Uuid::new_v4());
+        if !Self::set_clipboard_text(&sentinel) {
+            eprintln!("[clipboard] Failed to write sentinel");
+            return None;
+        }
 
         // Simulate Cmd+C — create Enigo on demand (not Send-safe to store)
         {
@@ -40,6 +50,7 @@ impl ClipboardManager {
                 Ok(e) => e,
                 Err(e) => {
                     eprintln!("[clipboard] Failed to create Enigo: {}", e);
+                    Self::restore_clipboard(&original_clipboard);
                     return None;
                 }
             };
@@ -47,55 +58,58 @@ impl ClipboardManager {
             let _ = enigo.key(Key::Unicode('c'), Click);
             let _ = enigo.key(Key::Meta, Release);
         }
-        eprintln!("[clipboard] Cmd+C sent, waiting 150ms...");
+        eprintln!("[clipboard] Cmd+C sent, waiting for clipboard update...");
 
-        // Wait for clipboard to update
-        sleep(Duration::from_millis(150)).await;
-
-        // Read new clipboard
-        let text = {
-            let mut cb = match Clipboard::new() {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("[clipboard] Failed to read clipboard: {}", e);
-                    return None;
-                }
-            };
-            cb.get_text().unwrap_or_default()
-        };
+        // Wait until the target app overwrites the sentinel, then restore the user's clipboard.
+        let mut text = sentinel.clone();
+        for _ in 0..12 {
+            sleep(Duration::from_millis(50)).await;
+            text = Self::get_clipboard_text().unwrap_or_default();
+            if text != sentinel {
+                break;
+            }
+        }
         eprintln!("[clipboard] Read clipboard: {} chars", text.len());
 
+        Self::restore_clipboard(&original_clipboard);
+
         // Validate
-        if text.len() < 2 {
-            eprintln!("[clipboard] Text too short ({}), skipping", text.len());
+        if text == sentinel {
+            eprintln!("[clipboard] Clipboard did not change after Cmd+C, skipping");
             return None;
         }
 
-        // Debounce: same text as last capture
-        {
-            let previous = self.previous_text.lock().unwrap();
-            if *previous == text {
-                eprintln!("[clipboard] Same as previous capture, skipping");
-                return None;
-            }
+        if text.trim().len() < 2 {
+            eprintln!(
+                "[clipboard] Text too short ({}), skipping",
+                text.trim().len()
+            );
+            return None;
         }
 
-        // Update previous text
-        {
-            let mut previous = self.previous_text.lock().unwrap();
-            *previous = text.clone();
-        }
-
-        // Restore original clipboard
-        let original = original_clipboard.clone();
-        tokio::spawn(async move {
-            sleep(Duration::from_millis(200)).await;
-            if let Ok(mut cb) = Clipboard::new() {
-                let _ = cb.set_text(&original);
-            }
-        });
-
-        eprintln!("[clipboard] Captured: {:?}", &text[..text.len().min(80)]);
+        let preview: String = text.chars().take(80).collect();
+        eprintln!("[clipboard] Captured: {:?}", preview);
         Some(text)
+    }
+
+    fn get_clipboard_text() -> Option<String> {
+        let mut cb = Clipboard::new().ok()?;
+        cb.get_text().ok()
+    }
+
+    fn set_clipboard_text(text: &str) -> bool {
+        match Clipboard::new() {
+            Ok(mut cb) => cb.set_text(text).is_ok(),
+            Err(e) => {
+                eprintln!("[clipboard] Failed to access clipboard: {}", e);
+                false
+            }
+        }
+    }
+
+    fn restore_clipboard(original: &str) {
+        if !Self::set_clipboard_text(original) {
+            eprintln!("[clipboard] Failed to restore original clipboard");
+        }
     }
 }

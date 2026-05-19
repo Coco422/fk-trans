@@ -478,7 +478,7 @@ export default function App() {
                                   <textarea
                                     class="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400 resize-y min-h-[40px] font-mono"
                                     rows={2}
-                                    placeholder='{"enable_thinking": false}'
+                                    placeholder='{"chat_template_kwargs":{"enable_thinking":false}}'
                                     value={JSON.stringify(
                                       provider.extra_params || {},
                                       null,

@@ -19,7 +19,9 @@ impl Default for OpenAICompatProvider {
             model: "gpt-4.1-mini".to_string(),
             system_prompt: "You are a translator. Translate the following text from {from} to {to}. Output ONLY the translation, nothing else.".to_string(),
             user_prompt: "{text}".to_string(),
-            extra_params: serde_json::json!({"enable_thinking": false}),
+            extra_params: serde_json::json!({
+                "chat_template_kwargs": { "enable_thinking": false }
+            }),
             client: Client::new(),
         }
     }
@@ -46,11 +48,69 @@ impl OpenAICompatProvider {
     }
 
     fn format_prompt(template: &str, from: &str, to: &str, text: &str) -> String {
-        let from_label = if from == "auto" { "the detected language" } else { from };
+        let from_label = if from == "auto" {
+            "the detected language"
+        } else {
+            from
+        };
         template
             .replace("{from}", from_label)
             .replace("{to}", to)
             .replace("{text}", text)
+    }
+
+    fn merge_extra_params(body: &mut serde_json::Value, extra_params: &serde_json::Value) {
+        let Some(body_obj) = body.as_object_mut() else {
+            return;
+        };
+        let Some(extra_obj) = extra_params.as_object() else {
+            return;
+        };
+
+        let mut legacy_enable_thinking = None;
+        let mut nested_enable_thinking_set = false;
+
+        for (key, value) in extra_obj {
+            match key.as_str() {
+                // Older configs used the top-level Qwen flag. vLLM expects this under
+                // chat_template_kwargs, so do not forward the legacy key directly.
+                "enable_thinking" => {
+                    legacy_enable_thinking = Some(value.clone());
+                }
+                "chat_template_kwargs" => {
+                    if let Some(incoming_obj) = value.as_object() {
+                        nested_enable_thinking_set = incoming_obj.contains_key("enable_thinking");
+                        let target = body_obj
+                            .entry("chat_template_kwargs".to_string())
+                            .or_insert_with(|| serde_json::json!({}));
+
+                        if let Some(target_obj) = target.as_object_mut() {
+                            for (nested_key, nested_value) in incoming_obj {
+                                target_obj.insert(nested_key.clone(), nested_value.clone());
+                            }
+                        } else {
+                            body_obj.insert(key.clone(), value.clone());
+                        }
+                    } else {
+                        body_obj.insert(key.clone(), value.clone());
+                    }
+                }
+                _ => {
+                    body_obj.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
+        if let Some(value) = legacy_enable_thinking {
+            if !nested_enable_thinking_set {
+                let target = body_obj
+                    .entry("chat_template_kwargs".to_string())
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(target_obj) = target.as_object_mut() {
+                    target_obj.insert("enable_thinking".to_string(), value);
+                }
+            }
+        }
     }
 }
 
@@ -78,17 +138,14 @@ impl TranslateProvider for OpenAICompatProvider {
                 { "role": "user", "content": user_content }
             ],
             "temperature": 0.3,
-            "max_tokens": 2048
+            "max_tokens": 2048,
+            "chat_template_kwargs": {
+                "enable_thinking": false
+            }
         });
 
         // Merge extra_params into the request body
-        if let Some(obj) = self.extra_params.as_object() {
-            if let Some(body_obj) = body.as_object_mut() {
-                for (k, v) in obj {
-                    body_obj.insert(k.clone(), v.clone());
-                }
-            }
-        }
+        Self::merge_extra_params(&mut body, &self.extra_params);
 
         let resp = self
             .client
@@ -102,7 +159,10 @@ impl TranslateProvider for OpenAICompatProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(TranslateError::Api(format!("HTTP {}: {}", status, body_text)));
+            return Err(TranslateError::Api(format!(
+                "HTTP {}: {}",
+                status, body_text
+            )));
         }
 
         let json: serde_json::Value = resp

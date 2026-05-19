@@ -36,3 +36,12 @@ html {
   padding: 0;
   overflow: hidden;
 }
+
+.popup-scroll {
+  scrollbar-width: none;
+}
+
+.popup-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}

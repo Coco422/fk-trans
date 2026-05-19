@@ -1078,6 +1078,7 @@ dependencies = [
  "arboard",
  "async-trait",
  "chrono",
+ "core-foundation 0.10.1",
  "core-graphics 0.24.0",
  "dirs",
  "enigo",
