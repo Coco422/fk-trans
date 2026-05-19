@@ -1,4 +1,4 @@
-use crate::config::ProviderConfig;
+use crate::config::{self, ProviderConfig};
 use crate::AppState;
 use std::sync::Arc;
 use tauri::State;
@@ -11,7 +11,7 @@ use crate::translate::custom_http::CustomHttpProvider;
 use crate::translate::provider::TranslateProvider;
 
 #[tauri::command]
-pub async fn get_config(state: State<'_, AppState>) -> Result<crate::config::AppConfig, String> {
+pub async fn get_config(state: State<'_, AppState>) -> Result<config::AppConfig, String> {
     let config = state.config.lock().unwrap();
     Ok(config.clone())
 }
@@ -20,7 +20,7 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<crate::config::App
 pub async fn update_config(
     updates: serde_json::Value,
     state: State<'_, AppState>,
-) -> Result<crate::config::AppConfig, String> {
+) -> Result<config::AppConfig, String> {
     let mut config = state.config.lock().unwrap();
 
     if let Some(enabled) = updates.get("enabled").and_then(|v| v.as_bool()) {
@@ -36,6 +36,7 @@ pub async fn update_config(
         config.active_provider = provider.to_string();
     }
 
+    config::save_config(&config);
     Ok(config.clone())
 }
 
@@ -62,6 +63,7 @@ pub async fn update_provider(
         });
     }
 
+    config::save_config(&config);
     Ok(())
 }
 

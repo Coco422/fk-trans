@@ -116,7 +116,7 @@ pub fn run() {
             }
 
             // Initialize state
-            let config = AppConfig::default();
+            let config = config::load_config();
             let active_provider = config.active_provider.clone();
 
             app.manage(AppState {
@@ -183,6 +183,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::translation::translate_text,
             commands::translation::ai_action,
+            commands::translation::get_history,
+            commands::translation::clear_history,
             commands::settings::get_config,
             commands::settings::update_config,
             commands::settings::update_provider,

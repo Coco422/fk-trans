@@ -1,3 +1,4 @@
+use crate::history::HistoryEntry;
 use crate::translate::provider::TranslateResult;
 use crate::AppState;
 use tauri::State;
@@ -14,6 +15,17 @@ pub async fn translate_text(
         .translate(&text, &from, &to)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_history(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, String> {
+    Ok(state.history.get_all())
+}
+
+#[tauri::command]
+pub async fn clear_history(state: State<'_, AppState>) -> Result<(), String> {
+    state.history.clear();
+    Ok(())
 }
 
 #[tauri::command]
