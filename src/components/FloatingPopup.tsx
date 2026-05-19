@@ -137,9 +137,19 @@ export default function FloatingPopup() {
       {/* Loading state */}
       <Show when={loading() && !data() && !error()}>
         <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 p-4 w-[380px] animate-fade-in">
-          <div class="flex items-center gap-3 text-gray-500">
-            <div class="w-4 h-4 border-2 border-gray-300 border-t-blue-500 rounded-full animate-spin" />
-            <span class="text-sm">Translating...</span>
+          <div class="flex items-center gap-3 mb-3">
+            <div class="relative w-5 h-5">
+              <div class="absolute inset-0 rounded-full border-2 border-blue-200 dark:border-blue-800" />
+              <div class="absolute inset-0 rounded-full border-2 border-transparent border-t-blue-500 animate-spin" />
+            </div>
+            <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
+              Translating...
+            </span>
+          </div>
+          {/* Shimmer placeholder */}
+          <div class="space-y-2">
+            <div class="h-3 w-3/4 rounded bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 dark:from-gray-700 dark:via-gray-600 dark:to-gray-700 animate-pulse" />
+            <div class="h-3 w-1/2 rounded bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 dark:from-gray-700 dark:via-gray-600 dark:to-gray-700 animate-pulse" />
           </div>
         </div>
       </Show>
@@ -147,7 +157,7 @@ export default function FloatingPopup() {
       {/* Translation result */}
       <Show when={data()}>
         {(payload) => (
-          <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 p-4 w-[380px] animate-fade-in">
+          <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 p-4 w-[380px] animate-result-in">
             {/* Language pair + provider */}
             <div class="flex items-center justify-between mb-2">
               <div class="text-xs text-gray-500 dark:text-gray-400 font-mono">

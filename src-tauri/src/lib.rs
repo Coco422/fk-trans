@@ -31,17 +31,27 @@ async fn run_translation_pipeline(app: tauri::AppHandle, cm: Arc<clipboard::mana
         }
     }
 
-    // Emit loading event
+    // Show popup immediately at cursor position with loading state
+    let pos = mouse::cursor::get_cursor_position();
+    if let Some(window) = app.get_webview_window("popup") {
+        let _ = window.set_position(tauri::Position::Logical(
+            tauri::LogicalPosition::new(pos.x, pos.y),
+        ));
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
     let _ = app.emit("translation-started", ());
 
     // Capture selected text
     let text = match cm.capture_selected_text().await {
         Some(t) => t,
-        None => return,
+        None => {
+            if let Some(window) = app.get_webview_window("popup") {
+                let _ = window.hide();
+            }
+            return;
+        }
     };
-
-    // Get cursor position
-    let pos = mouse::cursor::get_cursor_position();
 
     // Get config values
     let state = app.state::<AppState>();
@@ -54,7 +64,6 @@ async fn run_translation_pipeline(app: tauri::AppHandle, cm: Arc<clipboard::mana
     let engine = state.translation_engine.read().await;
     match engine.translate(&text, &source_lang, &target_lang).await {
         Ok(result) => {
-            // Save to history
             state.history.add(history::HistoryEntry {
                 id: uuid::Uuid::new_v4().to_string(),
                 timestamp: chrono::Utc::now().timestamp(),
@@ -65,16 +74,6 @@ async fn run_translation_pipeline(app: tauri::AppHandle, cm: Arc<clipboard::mana
                 provider: result.provider.clone(),
             });
 
-            // Position and show popup
-            if let Some(window) = app.get_webview_window("popup") {
-                let _ = window.set_position(tauri::Position::Logical(
-                    tauri::LogicalPosition::new(pos.x, pos.y),
-                ));
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-
-            // Emit translation result
             let _ = app.emit(
                 "translation-ready",
                 serde_json::json!({
@@ -87,16 +86,6 @@ async fn run_translation_pipeline(app: tauri::AppHandle, cm: Arc<clipboard::mana
         }
         Err(e) => {
             log::error!("Translation error: {}", e);
-
-            // Show popup with error
-            if let Some(window) = app.get_webview_window("popup") {
-                let _ = window.set_position(tauri::Position::Logical(
-                    tauri::LogicalPosition::new(pos.x, pos.y),
-                ));
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-
             let _ = app.emit("translation-error", e.to_string());
         }
     }
