@@ -32,10 +32,6 @@ impl OpenAICompatProvider {
 
 #[async_trait::async_trait]
 impl TranslateProvider for OpenAICompatProvider {
-    fn name(&self) -> &str {
-        "openai"
-    }
-
     async fn translate(
         &self,
         text: &str,

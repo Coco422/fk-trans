@@ -17,10 +17,6 @@ impl DeepLXProvider {
 
 #[async_trait::async_trait]
 impl TranslateProvider for DeepLXProvider {
-    fn name(&self) -> &str {
-        "deeplx"
-    }
-
     async fn translate(
         &self,
         text: &str,

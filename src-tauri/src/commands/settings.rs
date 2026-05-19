@@ -21,23 +21,33 @@ pub async fn update_config(
     updates: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<config::AppConfig, String> {
-    let mut config = state.config.lock().unwrap();
+    let result = {
+        let mut config = state.config.lock().unwrap();
 
-    if let Some(enabled) = updates.get("enabled").and_then(|v| v.as_bool()) {
-        config.enabled = enabled;
-    }
-    if let Some(lang) = updates.get("source_lang").and_then(|v| v.as_str()) {
-        config.source_lang = lang.to_string();
-    }
-    if let Some(lang) = updates.get("target_lang").and_then(|v| v.as_str()) {
-        config.target_lang = lang.to_string();
-    }
-    if let Some(provider) = updates.get("active_provider").and_then(|v| v.as_str()) {
-        config.active_provider = provider.to_string();
+        if let Some(enabled) = updates.get("enabled").and_then(|v| v.as_bool()) {
+            config.enabled = enabled;
+        }
+        if let Some(lang) = updates.get("source_lang").and_then(|v| v.as_str()) {
+            config.source_lang = lang.to_string();
+        }
+        if let Some(lang) = updates.get("target_lang").and_then(|v| v.as_str()) {
+            config.target_lang = lang.to_string();
+        }
+        if let Some(provider) = updates.get("active_provider").and_then(|v| v.as_str()) {
+            config.active_provider = provider.to_string();
+        }
+
+        config::save_config(&config);
+        config.clone()
+    };
+
+    // Rebuild engine if active provider changed
+    if updates.get("active_provider").is_some() {
+        let mut engine = state.translation_engine.write().await;
+        engine.set_active_provider(&result.active_provider);
     }
 
-    config::save_config(&config);
-    Ok(config.clone())
+    Ok(result)
 }
 
 #[tauri::command]
@@ -48,22 +58,30 @@ pub async fn update_provider(
     model: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut config = state.config.lock().unwrap();
+    let provider_cfg = {
+        let mut config = state.config.lock().unwrap();
 
-    if let Some(p) = config.providers.iter_mut().find(|p| p.name == name) {
-        p.base_url = base_url;
-        p.api_key = api_key;
-        p.model = model;
-    } else {
-        config.providers.push(ProviderConfig {
-            name,
-            base_url,
-            api_key,
-            model,
-        });
-    }
+        if let Some(p) = config.providers.iter_mut().find(|p| p.name == name) {
+            p.base_url = base_url;
+            p.api_key = api_key;
+            p.model = model;
+        } else {
+            config.providers.push(ProviderConfig {
+                name: name.clone(),
+                base_url,
+                api_key,
+                model,
+            });
+        }
 
-    config::save_config(&config);
+        config::save_config(&config);
+        config.providers.iter().find(|p| p.name == name).unwrap().clone()
+    };
+
+    // Rebuild this provider in the engine
+    let mut engine = state.translation_engine.write().await;
+    engine.reload_provider(&provider_cfg);
+
     Ok(())
 }
 

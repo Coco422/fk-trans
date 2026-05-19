@@ -13,36 +13,51 @@ use std::time::{Duration, Instant};
 use provider::{TranslateError, TranslateProvider, TranslateResult};
 use tokio::sync::RwLock;
 
+use crate::config::ProviderConfig;
+
 pub struct TranslationEngine {
     providers: HashMap<String, Arc<dyn TranslateProvider>>,
     active_provider: String,
     dedup_cache: RwLock<HashMap<String, (TranslateResult, Instant)>>,
 }
 
+fn build_provider(cfg: &ProviderConfig) -> Arc<dyn TranslateProvider> {
+    match cfg.name.as_str() {
+        "deeplx" => Arc::new(deeplx::DeepLXProvider::new()),
+        "openai" => Arc::new(openai_compat::OpenAICompatProvider::new(
+            &cfg.base_url,
+            &cfg.api_key,
+            &cfg.model,
+        )),
+        "gemini" => Arc::new(gemini::GeminiProvider::new(
+            &cfg.base_url,
+            &cfg.api_key,
+            &cfg.model,
+        )),
+        "claude" => Arc::new(claude::ClaudeProvider::new(
+            &cfg.base_url,
+            &cfg.api_key,
+            &cfg.model,
+        )),
+        "ollama" => Arc::new(ollama::OllamaProvider::new(
+            &cfg.base_url,
+            &cfg.model,
+        )),
+        "custom_http" => Arc::new(custom_http::CustomHttpProvider::new(
+            &cfg.base_url,
+            &cfg.api_key,
+            std::collections::HashMap::new(),
+        )),
+        _ => Arc::new(openai_compat::OpenAICompatProvider::default()),
+    }
+}
+
 impl TranslationEngine {
-    pub fn new(active_provider: String) -> Self {
+    pub fn new(active_provider: String, provider_configs: &[ProviderConfig]) -> Self {
         let mut providers: HashMap<String, Arc<dyn TranslateProvider>> = HashMap::new();
-        providers.insert("deeplx".into(), Arc::new(deeplx::DeepLXProvider::new()));
-        providers.insert(
-            "openai".into(),
-            Arc::new(openai_compat::OpenAICompatProvider::default()),
-        );
-        providers.insert(
-            "gemini".into(),
-            Arc::new(gemini::GeminiProvider::default()),
-        );
-        providers.insert(
-            "claude".into(),
-            Arc::new(claude::ClaudeProvider::default()),
-        );
-        providers.insert(
-            "ollama".into(),
-            Arc::new(ollama::OllamaProvider::default()),
-        );
-        providers.insert(
-            "custom_http".into(),
-            Arc::new(custom_http::CustomHttpProvider::default()),
-        );
+        for cfg in provider_configs {
+            providers.insert(cfg.name.clone(), build_provider(cfg));
+        }
 
         Self {
             providers,
@@ -55,12 +70,8 @@ impl TranslationEngine {
         self.active_provider = name.to_string();
     }
 
-    pub fn update_provider_config(
-        &mut self,
-        name: &str,
-        provider: Arc<dyn TranslateProvider>,
-    ) {
-        self.providers.insert(name.to_string(), provider);
+    pub fn reload_provider(&mut self, cfg: &ProviderConfig) {
+        self.providers.insert(cfg.name.clone(), build_provider(cfg));
     }
 
     pub async fn translate(

@@ -32,10 +32,6 @@ impl ClaudeProvider {
 
 #[async_trait::async_trait]
 impl TranslateProvider for ClaudeProvider {
-    fn name(&self) -> &str {
-        "claude"
-    }
-
     async fn translate(
         &self,
         text: &str,

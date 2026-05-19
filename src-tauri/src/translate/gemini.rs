@@ -32,10 +32,6 @@ impl GeminiProvider {
 
 #[async_trait::async_trait]
 impl TranslateProvider for GeminiProvider {
-    fn name(&self) -> &str {
-        "gemini"
-    }
-
     async fn translate(
         &self,
         text: &str,

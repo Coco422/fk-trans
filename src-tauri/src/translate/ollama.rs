@@ -29,10 +29,6 @@ impl OllamaProvider {
 
 #[async_trait::async_trait]
 impl TranslateProvider for OllamaProvider {
-    fn name(&self) -> &str {
-        "ollama"
-    }
-
     async fn translate(
         &self,
         text: &str,

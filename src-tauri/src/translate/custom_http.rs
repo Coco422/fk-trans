@@ -33,10 +33,6 @@ impl CustomHttpProvider {
 
 #[async_trait::async_trait]
 impl TranslateProvider for CustomHttpProvider {
-    fn name(&self) -> &str {
-        "custom_http"
-    }
-
     async fn translate(
         &self,
         text: &str,

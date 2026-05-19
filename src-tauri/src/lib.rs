@@ -22,6 +22,15 @@ pub struct AppState {
 
 /// Shared translation pipeline: capture clipboard, translate, show popup.
 async fn run_translation_pipeline(app: tauri::AppHandle, cm: Arc<clipboard::manager::ClipboardManager>) {
+    // Check if enabled
+    {
+        let state = app.state::<AppState>();
+        let config = state.config.lock().unwrap();
+        if !config.enabled {
+            return;
+        }
+    }
+
     // Emit loading event
     let _ = app.emit("translation-started", ());
 
@@ -118,10 +127,11 @@ pub fn run() {
             // Initialize state
             let config = config::load_config();
             let active_provider = config.active_provider.clone();
+            let provider_configs = config.providers.clone();
 
             app.manage(AppState {
                 config: Mutex::new(config),
-                translation_engine: RwLock::new(TranslationEngine::new(active_provider)),
+                translation_engine: RwLock::new(TranslationEngine::new(active_provider, &provider_configs)),
                 history: HistoryStore::new(),
             });
 

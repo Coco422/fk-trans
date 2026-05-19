@@ -26,7 +26,6 @@ pub enum TranslateError {
 
 #[async_trait::async_trait]
 pub trait TranslateProvider: Send + Sync {
-    fn name(&self) -> &str;
     async fn translate(
         &self,
         text: &str,
