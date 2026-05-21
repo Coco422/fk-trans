@@ -51,9 +51,9 @@ impl Default for AppConfig {
                 },
                 ProviderConfig {
                     name: "openai".into(),
-                    base_url: "http://172.16.99.204:3398/v1".into(),
-                    api_key: "sk-6kVkKPLJYRYx9nZ2wJHofUO2wF9IEHu1afz8zGfXXbUb8YGg".into(),
-                    model: "qwen3.6-27b".into(),
+                    base_url: "https://api.openai.com/v1".into(),
+                    api_key: String::new(),
+                    model: "gpt-4o-mini".into(),
                     system_prompt: default_system_prompt(),
                     user_prompt: default_user_prompt(),
                     extra_params: serde_json::json!({
