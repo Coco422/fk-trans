@@ -1,6 +1,6 @@
 [package]
 name = "fk-trans"
-version = "0.1.1"
+version = "0.1.2"
 description = "Middle-click driven desktop translation tool"
 authors = ["Ray"]
 edition = "2021"

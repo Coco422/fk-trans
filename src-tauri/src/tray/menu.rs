@@ -44,8 +44,7 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             }
             "settings" => {
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+                    reveal_window(&window);
                 }
             }
             "quit" => {
@@ -62,12 +61,24 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             {
                 let app = tray.app_handle();
                 if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
+                    reveal_window(&window);
                 }
             }
         })
         .build(app)?;
 
     Ok(())
+}
+
+fn reveal_window(window: &tauri::WebviewWindow) {
+    let _ = window.unminimize();
+    let _ = window.set_always_on_top(true);
+    let _ = window.show();
+    let _ = window.set_focus();
+
+    let window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let _ = window.set_always_on_top(false);
+    });
 }

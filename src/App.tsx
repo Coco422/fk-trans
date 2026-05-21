@@ -1,4 +1,5 @@
 import { createSignal, createResource, For, Show, onMount, onCleanup } from "solid-js";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -78,8 +79,15 @@ export default function App() {
     status: "idle",
     message: "",
   });
+  const [appVersion, setAppVersion] = createSignal("");
 
   onMount(async () => {
+    try {
+      setAppVersion(await getVersion());
+    } catch {
+      setAppVersion("");
+    }
+
     const unlisten = await listen("config-changed", async () => {
       try {
         const updated = await invoke<AppConfig>("get_config");
@@ -171,9 +179,12 @@ export default function App() {
       const update = await check();
 
       if (!update) {
+        const version = appVersion();
         setUpdateStatus({
           status: "none",
-          message: "You are already on the latest version.",
+          message: version
+            ? `You are already on the latest version: v${version}.`
+            : "You are already on the latest version.",
         });
         return;
       }
@@ -220,7 +231,9 @@ export default function App() {
       <div class="flex-shrink-0 max-w-2xl mx-auto w-full px-6 pt-6 pb-0">
         <div class="flex items-center justify-between mb-4">
           <h1 class="text-xl font-semibold">fk-trans</h1>
-          <span class="text-xs text-gray-400">v0.1.0</span>
+          <span class="text-xs text-gray-400">
+            {appVersion() ? `v${appVersion()}` : ""}
+          </span>
         </div>
 
         {/* Tab bar */}
