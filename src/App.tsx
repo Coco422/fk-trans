@@ -1,6 +1,8 @@
 import { createSignal, createResource, For, Show, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
 
 interface ProviderConfig {
   name: string;
@@ -28,6 +30,11 @@ interface HistoryEntry {
   source_lang: string;
   target_lang: string;
   provider: string;
+}
+
+interface UpdateStatus {
+  status: "idle" | "checking" | "downloading" | "installed" | "none" | "error";
+  message: string;
 }
 
 const LANGUAGES = [
@@ -67,6 +74,10 @@ export default function App() {
     "general" | "providers" | "history"
   >("general");
   const [expandedProvider, setExpandedProvider] = createSignal<string | null>(null);
+  const [updateStatus, setUpdateStatus] = createSignal<UpdateStatus>({
+    status: "idle",
+    message: "",
+  });
 
   onMount(async () => {
     const unlisten = await listen("config-changed", async () => {
@@ -150,6 +161,56 @@ export default function App() {
       saveProvider(name, "extra_params", parsed);
     } catch {
       // invalid JSON, ignore
+    }
+  }
+
+  async function checkForUpdates() {
+    setUpdateStatus({ status: "checking", message: "Checking for updates..." });
+
+    try {
+      const update = await check();
+
+      if (!update) {
+        setUpdateStatus({
+          status: "none",
+          message: "You are already on the latest version.",
+        });
+        return;
+      }
+
+      let downloaded = 0;
+      let total: number | undefined;
+
+      await update.downloadAndInstall((event: DownloadEvent) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength;
+          downloaded = 0;
+          setUpdateStatus({
+            status: "downloading",
+            message: `Downloading v${update.version}...`,
+          });
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          const progress =
+            total && total > 0 ? ` ${Math.round((downloaded / total) * 100)}%` : "";
+          setUpdateStatus({
+            status: "downloading",
+            message: `Downloading v${update.version}${progress}`,
+          });
+        } else {
+          setUpdateStatus({
+            status: "installed",
+            message: `Installed v${update.version}. Relaunching...`,
+          });
+        }
+      });
+
+      await relaunch();
+    } catch (e) {
+      setUpdateStatus({
+        status: "error",
+        message: `Update failed: ${String(e)}`,
+      });
     }
   }
 
@@ -303,6 +364,42 @@ export default function App() {
                           </kbd>{" "}
                           to close popup
                         </div>
+                      </div>
+                    </div>
+
+                    {/* Updates */}
+                    <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                      <div class="flex items-center justify-between gap-4">
+                        <div>
+                          <div class="text-sm font-medium">Updates</div>
+                          <Show when={updateStatus().message}>
+                            <div
+                              class={`mt-1 text-xs ${
+                                updateStatus().status === "error"
+                                  ? "text-red-500"
+                                  : updateStatus().status === "installed"
+                                  ? "text-green-500"
+                                  : "text-gray-500"
+                              }`}
+                            >
+                              {updateStatus().message}
+                            </div>
+                          </Show>
+                        </div>
+                        <button
+                          class="text-xs px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                          disabled={
+                            updateStatus().status === "checking" ||
+                            updateStatus().status === "downloading" ||
+                            updateStatus().status === "installed"
+                          }
+                          onClick={checkForUpdates}
+                        >
+                          {updateStatus().status === "checking" ||
+                          updateStatus().status === "downloading"
+                            ? "Working..."
+                            : "Check & Install"}
+                        </button>
                       </div>
                     </div>
                   </div>

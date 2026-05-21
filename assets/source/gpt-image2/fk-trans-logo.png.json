@@ -1,0 +1,25 @@
+{
+  "mode": "generate",
+  "model": "gpt-image-2-b",
+  "size_requested": "512x512",
+  "prompt": "macOS app icon for fk-trans, a fast desktop translation utility triggered from selected text. Clean modern rounded-square icon, central abstract glyph combining a text cursor selection bracket, two overlapping speech bubbles, and a small lightning translation spark. No letters, no words, no flags. Friendly but sharp productivity-tool feel, high legibility at 32px, layered glassy vector-like bitmap, deep graphite background with teal blue and warm amber accent, soft depth, centered composition, no mockup, no UI screenshot.",
+  "source": "url",
+  "output": "assets/source/gpt-image2/fk-trans-logo.png",
+  "image": {
+    "format": "png",
+    "width": 1254,
+    "height": 1254,
+    "bytes": 1198291
+  },
+  "created": 1779331737,
+  "usage": {
+    "total_tokens": 4277,
+    "input_tokens": 102,
+    "output_tokens": 4175,
+    "input_tokens_details": {
+      "text_tokens": 102,
+      "image_tokens": 0
+    }
+  },
+  "revised_prompt": ""
+}

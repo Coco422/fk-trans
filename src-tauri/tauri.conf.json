@@ -38,6 +38,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "macOS": {
       "minimumSystemVersion": "11.0"
     },
@@ -48,5 +49,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFGM0IzRDc2NkJBOTgwQjUKUldTMWdLbHJkajA3SHpuYXUxR0luSlUzS09Zc3hIMFpoR3pHN3hwdktLcjBSQjVWOHdWMGk1YjkK",
+      "endpoints": [
+        "https://github.com/Coco422/fk-trans/releases/latest/download/latest.json"
+      ]
+    }
   }
 }
