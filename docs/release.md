@@ -42,7 +42,7 @@ src-tauri/target/aarch64-apple-darwin/release/bundle/macos/latest.json
 By default `latest.json` points to `app-v{version}`. Override that when building a manual release with:
 
 ```sh
-RELEASE_TAG=app-v0.1.2 npm run release:mac
+RELEASE_TAG=app-v0.1.3 npm run release:mac
 ```
 
 ## GitHub Actions release
@@ -59,11 +59,11 @@ To publish a release:
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
 2. Commit and push the version bump.
-3. Create and push a tag such as `app-v0.1.2`.
+3. Create and push a tag such as `app-v0.1.3`.
 
 ```sh
-git tag app-v0.1.2
-git push origin app-v0.1.2
+git tag app-v0.1.3
+git push origin app-v0.1.3
 ```
 
 The workflow uploads the DMG plus Tauri updater artifacts to the GitHub Release. The app checks:

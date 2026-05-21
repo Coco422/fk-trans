@@ -11,6 +11,26 @@ pub fn hide_dock_icon() {
     }
 }
 
+pub fn activate_app() {
+    unsafe {
+        let ns_app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
+    }
+}
+
+pub fn focus_window(window: &tauri::WebviewWindow) {
+    activate_app();
+
+    if let Ok(ns_window_ptr) = window.ns_window() {
+        let ns_window = ns_window_ptr as *mut Object;
+        unsafe {
+            let nil: *mut Object = std::ptr::null_mut();
+            let _: () = msg_send![ns_window, makeKeyAndOrderFront: nil];
+            let _: () = msg_send![ns_window, orderFrontRegardless];
+        }
+    }
+}
+
 /// Configure a Tauri window as non-activating (won't steal focus) on macOS.
 /// This is essential for the popup window so it appears without interrupting the user.
 pub fn configure_popup_window(window: &tauri::WebviewWindow) {

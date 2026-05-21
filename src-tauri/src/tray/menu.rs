@@ -5,6 +5,8 @@ use tauri::{
 };
 use crate::AppState;
 use crate::config;
+#[cfg(target_os = "macos")]
+use crate::platform;
 
 pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let state = app.state::<AppState>();
@@ -74,6 +76,10 @@ fn reveal_window(window: &tauri::WebviewWindow) {
     let _ = window.unminimize();
     let _ = window.set_always_on_top(true);
     let _ = window.show();
+
+    #[cfg(target_os = "macos")]
+    platform::macos::focus_window(window);
+
     let _ = window.set_focus();
 
     let window = window.clone();
