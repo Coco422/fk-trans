@@ -198,11 +198,15 @@ pub fn run() {
             {
                 platform::macos::hide_dock_icon();
 
-                if !platform::macos::check_accessibility_permissions() {
+                if platform::macos::check_accessibility_permissions() {
+                    platform::macos::clear_accessibility_settings_opened_marker();
+                } else {
                     log::warn!(
                         "Accessibility permissions not granted. Mouse listener may not work."
                     );
-                    platform::macos::open_accessibility_settings();
+                    if platform::macos::open_accessibility_settings_once() {
+                        log::info!("Opened Accessibility settings for initial permission setup.");
+                    }
                 }
             }
 

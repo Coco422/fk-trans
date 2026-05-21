@@ -2,6 +2,9 @@
 
 use objc::runtime::Object;
 use objc::{msg_send, sel, sel_impl, class};
+use std::path::PathBuf;
+
+const ACCESSIBILITY_SETTINGS_OPENED_MARKER: &str = "accessibility-settings-opened";
 
 pub fn hide_dock_icon() {
     unsafe {
@@ -67,9 +70,32 @@ pub fn check_accessibility_permissions() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
+fn accessibility_settings_opened_marker_path() -> PathBuf {
+    let dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("fk-trans");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(ACCESSIBILITY_SETTINGS_OPENED_MARKER)
+}
+
+pub fn clear_accessibility_settings_opened_marker() {
+    let _ = std::fs::remove_file(accessibility_settings_opened_marker_path());
+}
+
 pub fn open_accessibility_settings() {
     use std::process::Command;
     let _ = Command::new("open")
         .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         .spawn();
+}
+
+pub fn open_accessibility_settings_once() -> bool {
+    let marker_path = accessibility_settings_opened_marker_path();
+    if marker_path.exists() {
+        return false;
+    }
+
+    let _ = std::fs::write(marker_path, "");
+    open_accessibility_settings();
+    true
 }
