@@ -75,6 +75,12 @@ export default function App() {
     "general" | "providers" | "history"
   >("general");
   const [expandedProvider, setExpandedProvider] = createSignal<string | null>(null);
+  const [providerDrafts, setProviderDrafts] = createSignal<
+    Record<string, ProviderConfig>
+  >({});
+  const [extraParamDrafts, setExtraParamDrafts] = createSignal<
+    Record<string, string>
+  >({});
   const [updateStatus, setUpdateStatus] = createSignal<UpdateStatus>({
     status: "idle",
     message: "",
@@ -116,29 +122,117 @@ export default function App() {
     mutate(updated);
   }
 
-  async function saveProvider(
-    name: string,
+  function providerDraft(provider: ProviderConfig) {
+    return providerDrafts()[provider.name] ?? provider;
+  }
+
+  function updateProviderDraft(
+    provider: ProviderConfig,
     field: keyof ProviderConfig,
     value: string | Record<string, unknown>
   ) {
+    setProviderDrafts((prev) => ({
+      ...prev,
+      [provider.name]: {
+        ...(prev[provider.name] ?? provider),
+        [field]: value,
+      },
+    }));
+  }
+
+  function clearProviderDraft(name: string) {
+    setProviderDrafts((prev) => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+  }
+
+  function providerChanged(a: ProviderConfig, b: ProviderConfig) {
+    return (
+      a.base_url !== b.base_url ||
+      a.api_key !== b.api_key ||
+      a.model !== b.model ||
+      a.system_prompt !== b.system_prompt ||
+      a.user_prompt !== b.user_prompt ||
+      JSON.stringify(a.extra_params ?? {}) !== JSON.stringify(b.extra_params ?? {})
+    );
+  }
+
+  async function commitProvider(name: string) {
     const cfg = config();
-    if (!cfg) return;
+    if (!cfg) return true;
     const provider = cfg.providers.find((p) => p.name === name);
-    if (!provider) return;
+    const draft = providerDrafts()[name];
+    if (!provider || !draft) return true;
+
+    if (!providerChanged(draft, provider)) {
+      clearProviderDraft(name);
+      return true;
+    }
+
     await invoke("update_provider", {
       name,
-      base_url: field === "base_url" ? value : provider.base_url,
-      api_key: field === "api_key" ? value : provider.api_key,
-      model: field === "model" ? value : provider.model,
-      system_prompt: field === "system_prompt" ? value : provider.system_prompt,
-      user_prompt: field === "user_prompt" ? value : provider.user_prompt,
-      extra_params: field === "extra_params" ? value : provider.extra_params,
+      base_url: draft.base_url,
+      api_key: draft.api_key,
+      model: draft.model,
+      system_prompt: draft.system_prompt,
+      user_prompt: draft.user_prompt,
+      extra_params: draft.extra_params,
     });
     const updated = await invoke<AppConfig>("get_config");
     mutate(updated);
+    clearProviderDraft(name);
+    return true;
+  }
+
+  function extraParamsValue(provider: ProviderConfig) {
+    return (
+      extraParamDrafts()[provider.name] ??
+      JSON.stringify(providerDraft(provider).extra_params || {}, null, 2)
+    );
+  }
+
+  function updateExtraParamsDraft(provider: ProviderConfig, raw: string) {
+    setExtraParamDrafts((prev) => ({ ...prev, [provider.name]: raw }));
+    try {
+      updateProviderDraft(provider, "extra_params", JSON.parse(raw));
+    } catch {
+      // Keep the raw draft so typing invalid intermediate JSON does not get clobbered.
+    }
+  }
+
+  async function commitExtraParams(provider: ProviderConfig) {
+    const raw = extraParamDrafts()[provider.name];
+    if (raw === undefined) return commitProvider(provider.name);
+
+    try {
+      updateProviderDraft(provider, "extra_params", JSON.parse(raw));
+      setExtraParamDrafts((prev) => {
+        const next = { ...prev };
+        delete next[provider.name];
+        return next;
+      });
+      return commitProvider(provider.name);
+    } catch {
+      setTestResult((prev) => ({
+        ...prev,
+        [provider.name]: {
+          status: "error",
+          message: "Extra Parameters must be valid JSON before saving.",
+        },
+      }));
+      return false;
+    }
   }
 
   async function testProvider(name: string) {
+    const provider = config()?.providers.find((p) => p.name === name);
+    const committed = provider
+      ? await commitExtraParams(provider)
+      : await commitProvider(name);
+    if (!committed) return;
+
     setTestResult((prev) => ({
       ...prev,
       [name]: { status: "loading", message: "Testing..." },
@@ -161,15 +255,6 @@ export default function App() {
 
   function formatTime(ts: number) {
     return new Date(ts * 1000).toLocaleString();
-  }
-
-  function handleExtraParams(name: string, raw: string) {
-    try {
-      const parsed = JSON.parse(raw);
-      saveProvider(name, "extra_params", parsed);
-    } catch {
-      // invalid JSON, ignore
-    }
   }
 
   async function checkForUpdates() {
@@ -465,41 +550,44 @@ export default function App() {
                                 type="password"
                                 class="w-full px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400"
                                 placeholder="API Key"
-                                value={provider.api_key}
-                                onChange={(e) =>
-                                  saveProvider(
-                                    provider.name,
+                                value={providerDraft(provider).api_key}
+                                onInput={(e) =>
+                                  updateProviderDraft(
+                                    provider,
                                     "api_key",
                                     e.currentTarget.value
                                   )
                                 }
+                                onBlur={() => commitProvider(provider.name)}
                               />
                             </Show>
                             <div class="flex gap-2">
                               <input
                                 class="flex-1 px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400"
                                 placeholder="Base URL"
-                                value={provider.base_url}
-                                onChange={(e) =>
-                                  saveProvider(
-                                    provider.name,
+                                value={providerDraft(provider).base_url}
+                                onInput={(e) =>
+                                  updateProviderDraft(
+                                    provider,
                                     "base_url",
                                     e.currentTarget.value
                                   )
                                 }
+                                onBlur={() => commitProvider(provider.name)}
                               />
                               <Show when={provider.name !== "deeplx"}>
                                 <input
                                   class="w-40 px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400"
                                   placeholder="Model"
-                                  value={provider.model}
-                                  onChange={(e) =>
-                                    saveProvider(
-                                      provider.name,
+                                  value={providerDraft(provider).model}
+                                  onInput={(e) =>
+                                    updateProviderDraft(
+                                      provider,
                                       "model",
                                       e.currentTarget.value
                                     )
                                   }
+                                  onBlur={() => commitProvider(provider.name)}
                                 />
                               </Show>
                             </div>
@@ -543,14 +631,15 @@ export default function App() {
                                     class="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400 resize-y min-h-[60px] font-mono"
                                     rows={3}
                                     placeholder="You are a translator..."
-                                    value={provider.system_prompt}
-                                    onChange={(e) =>
-                                      saveProvider(
-                                        provider.name,
+                                    value={providerDraft(provider).system_prompt}
+                                    onInput={(e) =>
+                                      updateProviderDraft(
+                                        provider,
                                         "system_prompt",
                                         e.currentTarget.value
                                       )
                                     }
+                                    onBlur={() => commitProvider(provider.name)}
                                   />
                                 </div>
 
@@ -566,14 +655,15 @@ export default function App() {
                                     class="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400 resize-y min-h-[40px] font-mono"
                                     rows={2}
                                     placeholder="{text}"
-                                    value={provider.user_prompt}
-                                    onChange={(e) =>
-                                      saveProvider(
-                                        provider.name,
+                                    value={providerDraft(provider).user_prompt}
+                                    onInput={(e) =>
+                                      updateProviderDraft(
+                                        provider,
                                         "user_prompt",
                                         e.currentTarget.value
                                       )
                                     }
+                                    onBlur={() => commitProvider(provider.name)}
                                   />
                                 </div>
 
@@ -589,17 +679,14 @@ export default function App() {
                                     class="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400 resize-y min-h-[40px] font-mono"
                                     rows={2}
                                     placeholder='{"chat_template_kwargs":{"enable_thinking":false}}'
-                                    value={JSON.stringify(
-                                      provider.extra_params || {},
-                                      null,
-                                      2
-                                    )}
-                                    onBlur={(e) =>
-                                      handleExtraParams(
-                                        provider.name,
+                                    value={extraParamsValue(provider)}
+                                    onInput={(e) =>
+                                      updateExtraParamsDraft(
+                                        provider,
                                         e.currentTarget.value
                                       )
                                     }
+                                    onBlur={() => commitExtraParams(provider)}
                                   />
                                 </div>
                               </div>

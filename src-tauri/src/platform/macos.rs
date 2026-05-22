@@ -1,20 +1,21 @@
 #![allow(unexpected_cfgs)]
 
+use core_foundation::{
+    base::TCFType,
+    boolean::CFBoolean,
+    dictionary::{CFDictionary, CFDictionaryRef},
+    string::{CFString, CFStringRef},
+};
 use objc::runtime::Object;
-use objc::{msg_send, sel, sel_impl, class};
-use std::path::PathBuf;
+use objc::{class, msg_send, sel, sel_impl};
 
-const ACCESSIBILITY_SETTINGS_OPENED_MARKER: &str = "accessibility-settings-opened";
-
-pub fn hide_dock_icon() {
-    unsafe {
-        let ns_app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
-        // NSApplicationActivationPolicyAccessory = 2
-        let _: () = msg_send![ns_app, setActivationPolicy: 2i64];
+pub fn set_accessory_activation_policy(app: &tauri::AppHandle) {
+    if let Err(e) = app.set_activation_policy(tauri::ActivationPolicy::Accessory) {
+        log::warn!("Failed to set macOS accessory activation policy: {}", e);
     }
 }
 
-pub fn activate_app() {
+fn activate_app_now() {
     unsafe {
         let ns_app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
         let _: () = msg_send![ns_app, activateIgnoringOtherApps: true];
@@ -22,80 +23,68 @@ pub fn activate_app() {
 }
 
 pub fn focus_window(window: &tauri::WebviewWindow) {
-    activate_app();
+    let target = window.clone();
+    if let Err(e) = window.run_on_main_thread(move || {
+        activate_app_now();
 
-    if let Ok(ns_window_ptr) = window.ns_window() {
-        let ns_window = ns_window_ptr as *mut Object;
-        unsafe {
-            let nil: *mut Object = std::ptr::null_mut();
-            let _: () = msg_send![ns_window, makeKeyAndOrderFront: nil];
-            let _: () = msg_send![ns_window, orderFrontRegardless];
+        if let Ok(ns_window_ptr) = target.ns_window() {
+            let ns_window = ns_window_ptr as *mut Object;
+            unsafe {
+                let nil: *mut Object = std::ptr::null_mut();
+                let _: () = msg_send![ns_window, makeKeyAndOrderFront: nil];
+                let _: () = msg_send![ns_window, orderFrontRegardless];
+            }
         }
+    }) {
+        log::warn!("Failed to focus macOS window on main thread: {}", e);
     }
 }
 
 /// Configure a Tauri window as non-activating (won't steal focus) on macOS.
 /// This is essential for the popup window so it appears without interrupting the user.
 pub fn configure_popup_window(window: &tauri::WebviewWindow) {
-    if let Ok(ns_window_ptr) = window.ns_window() {
-        let ns_window = ns_window_ptr as *mut Object;
-        unsafe {
-            // NSWindowStyleMaskBorderless = 0
-            // NSNonactivatingPanelMask = 1 << 7 (0x80)
-            // This makes the window not activate the app when shown
-            let style_mask: u64 = 0 | (1 << 7);
-            let _: () = msg_send![ns_window, setStyleMask: style_mask];
+    let target = window.clone();
+    if let Err(e) = window.run_on_main_thread(move || {
+        if let Ok(ns_window_ptr) = target.ns_window() {
+            let ns_window = ns_window_ptr as *mut Object;
+            unsafe {
+                // NSWindowStyleMaskBorderless = 0
+                // NSNonactivatingPanelMask = 1 << 7 (0x80)
+                let style_mask: u64 = 0 | (1 << 7);
+                let _: () = msg_send![ns_window, setStyleMask: style_mask];
 
-            // Set the window level to floating (NSStatusWindowLevel = 25)
-            let _: () = msg_send![ns_window, setLevel: 25i64];
+                // Set the window level to floating (NSStatusWindowLevel = 25)
+                let _: () = msg_send![ns_window, setLevel: 25i64];
 
-            // Don't become key window on click
-            let _: () = msg_send![ns_window, setHidesOnDeactivate: false];
+                let _: () = msg_send![ns_window, setHidesOnDeactivate: false];
 
-            // Set background to clear for transparency
-            let bg: *mut Object = msg_send![class!(NSColor), clearColor];
-            let _: () = msg_send![ns_window, setBackgroundColor: bg];
+                let bg: *mut Object = msg_send![class!(NSColor), clearColor];
+                let _: () = msg_send![ns_window, setBackgroundColor: bg];
 
-            // Make the titlebar transparent
-            let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: true];
+                let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: true];
+            }
         }
+    }) {
+        log::warn!("Failed to configure popup window on main thread: {}", e);
     }
 }
 
 extern "C" {
     fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    static kAXTrustedCheckOptionPrompt: CFStringRef;
 }
 
 pub fn check_accessibility_permissions() -> bool {
     unsafe { AXIsProcessTrusted() }
 }
 
-fn accessibility_settings_opened_marker_path() -> PathBuf {
-    let dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("fk-trans");
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join(ACCESSIBILITY_SETTINGS_OPENED_MARKER)
-}
-
-pub fn clear_accessibility_settings_opened_marker() {
-    let _ = std::fs::remove_file(accessibility_settings_opened_marker_path());
-}
-
-pub fn open_accessibility_settings() {
-    use std::process::Command;
-    let _ = Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .spawn();
-}
-
-pub fn open_accessibility_settings_once() -> bool {
-    let marker_path = accessibility_settings_opened_marker_path();
-    if marker_path.exists() {
-        return false;
+pub fn request_accessibility_permissions() -> bool {
+    unsafe {
+        let prompt_key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+        let prompt_value = CFBoolean::true_value();
+        let options =
+            CFDictionary::from_CFType_pairs(&[(prompt_key.as_CFType(), prompt_value.as_CFType())]);
+        AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef())
     }
-
-    let _ = std::fs::write(marker_path, "");
-    open_accessibility_settings();
-    true
 }

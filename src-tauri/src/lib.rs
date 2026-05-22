@@ -25,6 +25,7 @@ pub struct AppState {
     pub config: Mutex<AppConfig>,
     pub translation_engine: RwLock<TranslationEngine>,
     pub history: HistoryStore,
+    pub mouse_listener: Mutex<Option<mouse::listener::MouseListener>>,
 }
 
 struct PipelineGuard {
@@ -82,6 +83,24 @@ fn popup_position_for_cursor(
     PhysicalPosition::new(x.round() as i32, y.round() as i32)
 }
 
+fn show_popup_at_cursor(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
+    if let Some(window) = app.get_webview_window("popup") {
+        let popup_pos = popup_position_for_cursor(&window, cursor);
+        log::info!(
+            "[pipeline] Showing popup at ({}, {})",
+            popup_pos.x,
+            popup_pos.y
+        );
+        let _ = window.set_position(tauri::Position::Physical(popup_pos));
+        let _ = window.show();
+    }
+}
+
+fn show_popup_error(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, message: String) {
+    show_popup_at_cursor(app, cursor);
+    let _ = app.emit("translation-error", message);
+}
+
 /// Shared translation pipeline: capture clipboard, translate, show popup.
 async fn run_translation_pipeline(
     app: tauri::AppHandle,
@@ -99,6 +118,34 @@ async fn run_translation_pipeline(
 
     log::info!("[pipeline] Translation pipeline triggered");
 
+    // Check if enabled and locally usable before touching the clipboard.
+    let provider_readiness = {
+        let state = app.state::<AppState>();
+        let config = state.config.lock().unwrap();
+        if !config.enabled {
+            log::info!("[pipeline] Disabled, skipping");
+            return;
+        }
+        config::validate_active_provider(&config)
+    };
+
+    let cursor_pos = current_cursor_position(&app);
+    log::info!(
+        "[pipeline] Cursor captured at ({}, {})",
+        cursor_pos.x,
+        cursor_pos.y
+    );
+
+    if let Err(reason) = provider_readiness {
+        log::warn!("[pipeline] No available provider: {}", reason);
+        show_popup_error(
+            &app,
+            cursor_pos,
+            "No available translation provider. Configure one in Settings.".to_string(),
+        );
+        return;
+    }
+
     // Check if enabled
     {
         let state = app.state::<AppState>();
@@ -108,13 +155,6 @@ async fn run_translation_pipeline(
             return;
         }
     }
-
-    let cursor_pos = current_cursor_position(&app);
-    log::info!(
-        "[pipeline] Cursor captured at ({}, {})",
-        cursor_pos.x,
-        cursor_pos.y
-    );
 
     // Capture selected text before showing the popup so failed captures do not flash.
     log::info!("[pipeline] Capturing selected text...");
@@ -130,16 +170,7 @@ async fn run_translation_pipeline(
     };
 
     // Show popup at cursor position with loading state.
-    if let Some(window) = app.get_webview_window("popup") {
-        let popup_pos = popup_position_for_cursor(&window, cursor_pos);
-        log::info!(
-            "[pipeline] Showing popup at ({}, {})",
-            popup_pos.x,
-            popup_pos.y
-        );
-        let _ = window.set_position(tauri::Position::Physical(popup_pos));
-        let _ = window.show();
-    }
+    show_popup_at_cursor(&app, cursor_pos);
     let _ = app.emit("translation-started", ());
 
     // Get config values
@@ -196,17 +227,13 @@ pub fn run() {
             // Hide dock icon on macOS
             #[cfg(target_os = "macos")]
             {
-                platform::macos::hide_dock_icon();
+                platform::macos::set_accessory_activation_policy(app.handle());
 
-                if platform::macos::check_accessibility_permissions() {
-                    platform::macos::clear_accessibility_settings_opened_marker();
-                } else {
+                if !platform::macos::check_accessibility_permissions() {
                     log::warn!(
                         "Accessibility permissions not granted. Mouse listener may not work."
                     );
-                    if platform::macos::open_accessibility_settings_once() {
-                        log::info!("Opened Accessibility settings for initial permission setup.");
-                    }
+                    let _ = platform::macos::request_accessibility_permissions();
                 }
             }
 
@@ -222,6 +249,7 @@ pub fn run() {
                     &provider_configs,
                 )),
                 history: HistoryStore::new(),
+                mouse_listener: Mutex::new(None),
             });
 
             // Create system tray
@@ -246,6 +274,11 @@ pub fn run() {
             // Start mouse listener in dedicated thread
             let listener = mouse::listener::MouseListener::new();
             listener.start(tx);
+            app.state::<AppState>()
+                .mouse_listener
+                .lock()
+                .unwrap()
+                .replace(listener);
 
             let app_handle_clone = app_handle.clone();
             let clipboard_clone = clipboard_manager.clone();

@@ -1,12 +1,12 @@
-use tauri::{
-    AppHandle, Emitter, Manager,
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    menu::{MenuBuilder, MenuItemBuilder, CheckMenuItemBuilder},
-};
-use crate::AppState;
 use crate::config;
 #[cfg(target_os = "macos")]
 use crate::platform;
+use crate::AppState;
+use tauri::{
+    menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager,
+};
 
 pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let state = app.state::<AppState>();
@@ -15,10 +15,8 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let enable_item = CheckMenuItemBuilder::with_id("enable", "Enable fk-trans")
         .checked(is_enabled)
         .build(app)?;
-    let settings_item = MenuItemBuilder::with_id("settings", "Settings...")
-        .build(app)?;
-    let quit_item = MenuItemBuilder::with_id("quit", "Quit")
-        .build(app)?;
+    let settings_item = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
+    let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
 
     let menu = MenuBuilder::new(app)
         .item(&enable_item)
@@ -42,7 +40,10 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     let _ = window.emit("config-changed", ());
                 }
                 let _ = enable_item.set_checked(new_state);
-                log::info!("fk-trans {}", if new_state { "enabled" } else { "disabled" });
+                log::info!(
+                    "fk-trans {}",
+                    if new_state { "enabled" } else { "disabled" }
+                );
             }
             "settings" => {
                 if let Some(window) = app.get_webview_window("main") {
@@ -50,6 +51,13 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "quit" => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let _ = state.mouse_listener.lock().map(|mut listener| {
+                        if let Some(listener) = listener.take() {
+                            listener.stop();
+                        }
+                    });
+                }
                 app.exit(0);
             }
             _ => {}
