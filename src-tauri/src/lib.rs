@@ -9,23 +9,30 @@ mod tray;
 
 use config::AppConfig;
 use history::HistoryStore;
+use mouse::listener::{MouseTriggerEvent, TriggerSource};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 use tauri::{Emitter, Manager, PhysicalPosition};
 use tokio::sync::RwLock;
+use tokio::time::{timeout, Duration};
+use translate::provider::TranslateError;
 use translate::TranslationEngine;
 
 const POPUP_CURSOR_OFFSET_X: f64 = 14.0;
 const POPUP_CURSOR_OFFSET_Y: f64 = 16.0;
 const POPUP_SCREEN_MARGIN: f64 = 8.0;
+const LOG_MAX_FILE_SIZE_BYTES: u64 = 512 * 1024;
+const LOG_ROTATION_KEEP_FILES: usize = 4;
+const CLIPBOARD_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
     pub translation_engine: RwLock<TranslationEngine>,
     pub history: HistoryStore,
     pub mouse_listener: Mutex<Option<mouse::listener::MouseListener>>,
+    pub mouse_trigger_state: mouse::listener::SharedMouseTriggerState,
 }
 
 struct PipelineGuard {
@@ -101,29 +108,90 @@ fn show_popup_error(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, messa
     let _ = app.emit("translation-error", message);
 }
 
+fn emit_mouse_trigger_state(app: &tauri::AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        let snapshot = mouse::listener::snapshot(&state.mouse_trigger_state);
+        let _ = app.emit("mouse-trigger-state", snapshot);
+    }
+}
+
+fn text_hash(text: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn translate_error_kind(error: &TranslateError) -> &'static str {
+    match error {
+        TranslateError::Network(_) => "network",
+        TranslateError::Api(_) => "api",
+        TranslateError::RateLimited => "rate_limited",
+        TranslateError::Config(_) => "config",
+    }
+}
+
+fn apply_log_level(debug_logging: bool) {
+    log::set_max_level(if debug_logging {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    });
+}
+
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("[panic] {}", info);
+    }));
+}
+
 /// Shared translation pipeline: capture clipboard, translate, show popup.
 async fn run_translation_pipeline(
     app: tauri::AppHandle,
     cm: Arc<clipboard::manager::ClipboardManager>,
     running: Arc<AtomicBool>,
+    source: TriggerSource,
 ) {
     if running
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
         log::info!("[pipeline] Previous pipeline still running, skipping trigger");
+        if let Some(state) = app.try_state::<AppState>() {
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                "Skipped: previous pipeline still running",
+                None,
+            );
+            emit_mouse_trigger_state(&app);
+        }
         return;
     }
     let _guard = PipelineGuard { running };
 
-    log::info!("[pipeline] Translation pipeline triggered");
+    log::info!(
+        "[pipeline] Translation pipeline triggered from {:?}",
+        source
+    );
+    if let Some(state) = app.try_state::<AppState>() {
+        mouse::listener::mark_pipeline_triggered(&state.mouse_trigger_state, source);
+        emit_mouse_trigger_state(&app);
+    }
 
     // Check if enabled and locally usable before touching the clipboard.
-    let provider_readiness = {
+    let readiness = {
         let state = app.state::<AppState>();
         let config = state.config.lock().unwrap();
         if !config.enabled {
             log::info!("[pipeline] Disabled, skipping");
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                "Skipped: fk-trans disabled",
+                None,
+            );
+            emit_mouse_trigger_state(&app);
             return;
         }
         config::validate_active_provider(&config)
@@ -136,42 +204,72 @@ async fn run_translation_pipeline(
         cursor_pos.y
     );
 
-    if let Err(reason) = provider_readiness {
+    if let Err(reason) = readiness {
         log::warn!("[pipeline] No available provider: {}", reason);
         show_popup_error(
             &app,
             cursor_pos,
             "No available translation provider. Configure one in Settings.".to_string(),
         );
+        let state = app.state::<AppState>();
+        mouse::listener::mark_pipeline_result(
+            &state.mouse_trigger_state,
+            "Failed: no available translation provider",
+            Some(reason),
+        );
+        emit_mouse_trigger_state(&app);
         return;
     }
 
-    // Check if enabled
-    {
-        let state = app.state::<AppState>();
-        let config = state.config.lock().unwrap();
-        if !config.enabled {
-            log::info!("[pipeline] Disabled, skipping");
-            return;
-        }
-    }
+    // Show a visible loading state before clipboard capture so trigger failures are observable.
+    show_popup_at_cursor(&app, cursor_pos);
+    let _ = app.emit("translation-started", ());
 
-    // Capture selected text before showing the popup so failed captures do not flash.
     log::info!("[pipeline] Capturing selected text...");
-    let text = match cm.capture_selected_text().await {
-        Some(t) => {
-            log::info!("[pipeline] Captured text: {} chars", t.len());
+    let text = match timeout(CLIPBOARD_CAPTURE_TIMEOUT, cm.capture_selected_text()).await {
+        Ok(Some(t)) => {
+            log::info!(
+                "[pipeline] Captured text: chars={} hash={:016x}",
+                t.chars().count(),
+                text_hash(&t)
+            );
             t
         }
-        None => {
+        Ok(None) => {
             log::warn!("[pipeline] No text captured, skipping");
+            let _ = app.emit(
+                "translation-error",
+                "No selected text captured. Select text in another app and try again.".to_string(),
+            );
+            let state = app.state::<AppState>();
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                "Failed: no selected text captured",
+                Some("Clipboard capture did not return selected text".to_string()),
+            );
+            emit_mouse_trigger_state(&app);
+            return;
+        }
+        Err(_) => {
+            log::error!(
+                "[pipeline] Clipboard capture timed out after {} ms",
+                CLIPBOARD_CAPTURE_TIMEOUT.as_millis()
+            );
+            let _ = app.emit(
+                "translation-error",
+                "Clipboard capture timed out. Try again after selecting text in the target app."
+                    .to_string(),
+            );
+            let state = app.state::<AppState>();
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                "Failed: clipboard capture timed out",
+                Some("Clipboard capture timeout".to_string()),
+            );
+            emit_mouse_trigger_state(&app);
             return;
         }
     };
-
-    // Show popup at cursor position with loading state.
-    show_popup_at_cursor(&app, cursor_pos);
-    let _ = app.emit("translation-started", ());
 
     // Get config values
     let state = app.state::<AppState>();
@@ -184,6 +282,11 @@ async fn run_translation_pipeline(
     let engine = state.translation_engine.read().await;
     match engine.translate(&text, &source_lang, &target_lang).await {
         Ok(result) => {
+            let success_message = format!(
+                "Success: translated {} chars with {}",
+                text.chars().count(),
+                result.provider
+            );
             state.history.add(history::HistoryEntry {
                 id: uuid::Uuid::new_v4().to_string(),
                 timestamp: chrono::Utc::now().timestamp(),
@@ -203,19 +306,45 @@ async fn run_translation_pipeline(
                     "cursor_y": cursor_pos.y,
                 }),
             );
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                success_message,
+                None,
+            );
+            emit_mouse_trigger_state(&app);
         }
         Err(e) => {
-            log::error!("Translation error: {}", e);
+            let error_kind = translate_error_kind(&e);
+            log::error!("[pipeline] Translation error kind={}", error_kind);
             let _ = app.emit("translation-error", e.to_string());
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                "Failed: translation error",
+                Some(format!("Translation error kind: {}", error_kind)),
+            );
+            emit_mouse_trigger_state(&app);
         }
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Debug)
+                .max_file_size(LOG_MAX_FILE_SIZE_BYTES as u128)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(
+                    LOG_ROTATION_KEEP_FILES,
+                ))
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: None,
+                    }),
+                ])
+                .build(),
+        )
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -224,6 +353,8 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            install_panic_hook();
+
             // Hide dock icon on macOS
             #[cfg(target_os = "macos")]
             {
@@ -239,8 +370,21 @@ pub fn run() {
 
             // Initialize state
             let config = config::load_config();
+            apply_log_level(config.debug_logging);
+            log::info!(
+                "[logging] Debug logging {}, max_file_size={} bytes, rotated_files_kept={}",
+                if config.debug_logging {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                LOG_MAX_FILE_SIZE_BYTES,
+                LOG_ROTATION_KEEP_FILES
+            );
             let active_provider = config.active_provider.clone();
             let provider_configs = config.providers.clone();
+            let mouse_trigger_state =
+                mouse::listener::new_shared_state(config.mouse_trigger_button);
 
             app.manage(AppState {
                 config: Mutex::new(config),
@@ -250,6 +394,7 @@ pub fn run() {
                 )),
                 history: HistoryStore::new(),
                 mouse_listener: Mutex::new(None),
+                mouse_trigger_state: mouse_trigger_state.clone(),
             });
 
             // Create system tray
@@ -269,11 +414,11 @@ pub fn run() {
 
             // --- Mouse listener pipeline ---
             let app_handle = app.handle().clone();
-            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let (tx, rx) = std::sync::mpsc::channel::<MouseTriggerEvent>();
 
             // Start mouse listener in dedicated thread
             let listener = mouse::listener::MouseListener::new();
-            listener.start(tx);
+            listener.start(tx, mouse_trigger_state.clone());
             app.state::<AppState>()
                 .mouse_listener
                 .lock()
@@ -287,11 +432,26 @@ pub fn run() {
             // Use a dedicated thread for receiving to avoid blocking tokio runtime
             std::thread::spawn(move || loop {
                 match rx.recv() {
-                    Ok(()) => {
+                    Ok(event) => {
+                        log::info!(
+                            "[mouse] Event delivered to pipeline receiver: button={} trigger={} ts={}",
+                            event.button,
+                            event.is_trigger,
+                            event.timestamp_ms
+                        );
                         let app = app_handle_clone.clone();
+                        emit_mouse_trigger_state(&app);
+                        if !event.is_trigger {
+                            continue;
+                        }
                         let cm = clipboard_clone.clone();
                         let running = mouse_pipeline_running.clone();
-                        tauri::async_runtime::spawn(run_translation_pipeline(app, cm, running));
+                        tauri::async_runtime::spawn(run_translation_pipeline(
+                            app,
+                            cm,
+                            running,
+                            TriggerSource::MouseMiddle,
+                        ));
                     }
                     Err(e) => {
                         log::error!("Channel error: {}", e);
@@ -314,12 +474,16 @@ pub fn run() {
                     return;
                 }
 
-                eprintln!("[shortcut] *** Cmd+Shift+T released! ***");
                 log::info!("[shortcut] Cmd+Shift+T triggered");
                 let app = app_handle.clone();
                 let cm = shortcut_cm.clone();
                 let running = shortcut_pipeline_running.clone();
-                tauri::async_runtime::spawn(run_translation_pipeline(app, cm, running));
+                tauri::async_runtime::spawn(run_translation_pipeline(
+                    app,
+                    cm,
+                    running,
+                    TriggerSource::KeyboardShortcut,
+                ));
             }) {
                 Ok(_) => log::info!("[shortcut] Cmd+Shift+T registered successfully"),
                 Err(e) => log::error!("[shortcut] Failed to register Cmd+Shift+T: {}", e),
@@ -336,7 +500,29 @@ pub fn run() {
             commands::settings::update_config,
             commands::settings::update_provider,
             commands::settings::test_provider,
+            commands::diagnostics::get_diagnostics_snapshot,
+            commands::diagnostics::start_middle_click_test,
+            commands::diagnostics::export_diagnostics_report,
+            commands::diagnostics::reveal_diagnostics_folder,
+            commands::diagnostics::open_accessibility_settings,
+            commands::diagnostics::log_frontend_event,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_rotation_policy_is_bounded() {
+        assert!(LOG_MAX_FILE_SIZE_BYTES <= 1024 * 1024);
+        assert!(LOG_ROTATION_KEEP_FILES <= 5);
+    }
+
+    #[test]
+    fn clipboard_capture_timeout_is_short() {
+        assert!(CLIPBOARD_CAPTURE_TIMEOUT <= Duration::from_secs(5));
+    }
 }

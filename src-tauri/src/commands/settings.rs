@@ -1,14 +1,25 @@
-use crate::config::{self, ProviderConfig};
-use crate::AppState;
-use std::sync::Arc;
-use tauri::State;
-use crate::translate::openai_compat::OpenAICompatProvider;
+use crate::translate::claude::ClaudeProvider;
+use crate::translate::custom_http::CustomHttpProvider;
 use crate::translate::deeplx::DeepLXProvider;
 use crate::translate::gemini::GeminiProvider;
-use crate::translate::claude::ClaudeProvider;
 use crate::translate::ollama::OllamaProvider;
-use crate::translate::custom_http::CustomHttpProvider;
-use crate::translate::provider::TranslateProvider;
+use crate::translate::openai_compat::OpenAICompatProvider;
+use crate::translate::provider::{TranslateError, TranslateProvider};
+use crate::{
+    config::{self, ProviderConfig},
+    AppState,
+};
+use std::sync::Arc;
+use tauri::State;
+
+fn translate_error_kind(error: &TranslateError) -> &'static str {
+    match error {
+        TranslateError::Network(_) => "network",
+        TranslateError::Api(_) => "api",
+        TranslateError::RateLimited => "rate_limited",
+        TranslateError::Config(_) => "config",
+    }
+}
 
 #[tauri::command]
 pub async fn get_config(state: State<'_, AppState>) -> Result<config::AppConfig, String> {
@@ -27,6 +38,9 @@ pub async fn update_config(
         if let Some(enabled) = updates.get("enabled").and_then(|v| v.as_bool()) {
             config.enabled = enabled;
         }
+        if let Some(debug_logging) = updates.get("debug_logging").and_then(|v| v.as_bool()) {
+            config.debug_logging = debug_logging;
+        }
         if let Some(lang) = updates.get("source_lang").and_then(|v| v.as_str()) {
             config.source_lang = lang.to_string();
         }
@@ -36,14 +50,34 @@ pub async fn update_config(
         if let Some(provider) = updates.get("active_provider").and_then(|v| v.as_str()) {
             config.active_provider = provider.to_string();
         }
+        if let Some(button) = updates.get("mouse_trigger_button").and_then(|v| v.as_i64()) {
+            config.mouse_trigger_button = button;
+        }
 
-        config::save_config(&config);
+        config::save_config(&config)?;
         config.clone()
     };
 
     if updates.get("active_provider").is_some() {
         let mut engine = state.translation_engine.write().await;
         engine.set_active_provider(&result.active_provider);
+    }
+    if updates.get("mouse_trigger_button").is_some() {
+        crate::mouse::listener::set_trigger_button(
+            &state.mouse_trigger_state,
+            result.mouse_trigger_button,
+        );
+    }
+    if updates.get("debug_logging").is_some() {
+        crate::apply_log_level(result.debug_logging);
+        log::info!(
+            "[settings] Debug logging {}",
+            if result.debug_logging {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
     }
 
     Ok(result)
@@ -88,9 +122,22 @@ pub async fn update_provider(
             });
         }
 
-        config::save_config(&config);
-        config.providers.iter().find(|p| p.name == name).unwrap().clone()
+        config::save_config(&config)?;
+        config
+            .providers
+            .iter()
+            .find(|p| p.name == name)
+            .cloned()
+            .ok_or_else(|| format!("Provider '{}' was not saved", name))?
     };
+
+    log::info!(
+        "[provider] Saved provider={} base_url_present={} api_key_present={} model_present={}",
+        provider_cfg.name,
+        !provider_cfg.base_url.trim().is_empty(),
+        !provider_cfg.api_key.trim().is_empty(),
+        !provider_cfg.model.trim().is_empty()
+    );
 
     let mut engine = state.translation_engine.write().await;
     engine.reload_provider(&provider_cfg);
@@ -112,6 +159,15 @@ pub async fn test_provider(
             .ok_or_else(|| format!("Provider '{}' not found", provider_name))?
             .clone()
     };
+
+    config::validate_provider(&provider_config)?;
+    log::info!(
+        "[provider] Testing provider={} base_url_present={} api_key_present={} model_present={}",
+        provider_config.name,
+        !provider_config.base_url.trim().is_empty(),
+        !provider_config.api_key.trim().is_empty(),
+        !provider_config.model.trim().is_empty()
+    );
 
     let provider: Arc<dyn TranslateProvider> = match provider_name.as_str() {
         "deeplx" => Arc::new(DeepLXProvider::new()),
@@ -154,8 +210,20 @@ pub async fn test_provider(
     let result = provider
         .translate("Hello, world!", "en", "zh")
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            log::warn!(
+                "[provider] Test failed provider={} error_kind={}",
+                provider_name,
+                translate_error_kind(&e)
+            );
+            e.to_string()
+        })?;
 
+    log::info!(
+        "[provider] Test succeeded provider={} translated_chars={}",
+        provider_name,
+        result.translated.chars().count()
+    );
     Ok(format!(
         "Test successful!\nTranslated: {}",
         result.translated

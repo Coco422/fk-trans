@@ -75,7 +75,10 @@ impl TranslateProvider for CustomHttpProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            return Err(TranslateError::Api(format!("HTTP {}: {}", status, body_text)));
+            return Err(TranslateError::Api(format!(
+                "HTTP {}: {}",
+                status, body_text
+            )));
         }
 
         let json: serde_json::Value = resp

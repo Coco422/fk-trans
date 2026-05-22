@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
+import { buildUpdateProviderArgs } from "./tauriArgs";
 
 interface ProviderConfig {
   name: string;
@@ -17,9 +18,11 @@ interface ProviderConfig {
 
 interface AppConfig {
   enabled: boolean;
+  debug_logging: boolean;
   source_lang: string;
   target_lang: string;
   active_provider: string;
+  mouse_trigger_button: number;
   providers: ProviderConfig[];
 }
 
@@ -36,6 +39,60 @@ interface HistoryEntry {
 interface UpdateStatus {
   status: "idle" | "checking" | "downloading" | "installed" | "none" | "error";
   message: string;
+}
+
+type ProviderStatus =
+  | "idle"
+  | "dirty"
+  | "saving"
+  | "saved"
+  | "save_error"
+  | "testing"
+  | "test_success"
+  | "test_error";
+
+interface ProviderUiStatus {
+  status: ProviderStatus;
+  message: string;
+}
+
+interface MouseTriggerState {
+  status: string;
+  accessibility_trusted: boolean;
+  trigger_button: number;
+  last_button?: number | null;
+  last_event_at?: number | null;
+  last_trigger_at?: number | null;
+  last_pipeline_at?: number | null;
+  last_pipeline_source?: string | null;
+  last_pipeline_result?: string | null;
+  last_error?: string | null;
+  test_active_until?: number | null;
+}
+
+interface DiagnosticsSnapshot {
+  app_version: string;
+  log_dir?: string | null;
+  debug_logging: boolean;
+  log_max_file_size_bytes: number;
+  log_rotation_keep_files: number;
+  accessibility_trusted: boolean;
+  mouse: MouseTriggerState;
+  active_provider_ready: boolean;
+  active_provider_reason?: string | null;
+  providers: Array<{
+    name: string;
+    active: boolean;
+    ready: boolean;
+    reason?: string | null;
+    base_url_configured: boolean;
+    api_key_configured: boolean;
+    model_configured: boolean;
+  }>;
+}
+
+interface ExportedDiagnostics {
+  path: string;
 }
 
 const LANGUAGES = [
@@ -68,11 +125,11 @@ export default function App() {
     invoke("get_config")
   );
   const [history, setHistory] = createSignal<HistoryEntry[]>([]);
-  const [testResult, setTestResult] = createSignal<
-    Record<string, { status: string; message: string }>
+  const [providerStatus, setProviderStatus] = createSignal<
+    Record<string, ProviderUiStatus>
   >({});
   const [activeTab, setActiveTab] = createSignal<
-    "general" | "providers" | "history"
+    "general" | "providers" | "diagnostics" | "history"
   >("general");
   const [expandedProvider, setExpandedProvider] = createSignal<string | null>(null);
   const [providerDrafts, setProviderDrafts] = createSignal<
@@ -86,21 +143,46 @@ export default function App() {
     message: "",
   });
   const [appVersion, setAppVersion] = createSignal("");
+  const [diagnostics, setDiagnostics] = createSignal<DiagnosticsSnapshot | null>(null);
+  const [diagnosticsMessage, setDiagnosticsMessage] = createSignal("");
 
-  onMount(async () => {
-    try {
-      setAppVersion(await getVersion());
-    } catch {
-      setAppVersion("");
-    }
+  onMount(() => {
+    let unlistenConfig: (() => void) | undefined;
+    let unlistenMouse: (() => void) | undefined;
 
-    const unlisten = await listen("config-changed", async () => {
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion(""));
+
+    refreshDiagnostics();
+
+    listen("config-changed", async () => {
       try {
         const updated = await invoke<AppConfig>("get_config");
         mutate(updated);
       } catch {}
+    }).then((unlisten) => {
+      unlistenConfig = unlisten;
     });
-    onCleanup(unlisten);
+    listen<MouseTriggerState>("mouse-trigger-state", (event) => {
+      setDiagnostics((prev) =>
+        prev
+          ? {
+              ...prev,
+              accessibility_trusted: event.payload.accessibility_trusted,
+              mouse: event.payload,
+            }
+          : prev
+      );
+    }).then((unlisten) => {
+      unlistenMouse = unlisten;
+    });
+    const interval = window.setInterval(refreshDiagnostics, 1000);
+    onCleanup(() => {
+      unlistenConfig?.();
+      unlistenMouse?.();
+      window.clearInterval(interval);
+    });
   });
 
   async function loadHistory() {
@@ -120,6 +202,69 @@ export default function App() {
   async function saveConfig(updates: Partial<AppConfig>) {
     const updated = await invoke<AppConfig>("update_config", { updates });
     mutate(updated);
+    await refreshDiagnostics();
+  }
+
+  async function refreshDiagnostics() {
+    try {
+      setDiagnostics(await invoke<DiagnosticsSnapshot>("get_diagnostics_snapshot"));
+    } catch {
+      setDiagnostics(null);
+    }
+  }
+
+  async function startMiddleClickTest() {
+    setDiagnosticsMessage("Press the mouse wheel within 10 seconds.");
+    try {
+      const mouse = await invoke<MouseTriggerState>("start_middle_click_test");
+      setDiagnostics((prev) =>
+        prev
+          ? {
+              ...prev,
+              mouse,
+            }
+          : prev
+      );
+    } catch (e) {
+      setDiagnosticsMessage(`Failed to start test: ${String(e)}`);
+    }
+  }
+
+  async function saveLastMouseButton() {
+    const lastButton = diagnostics()?.mouse.last_button;
+    if (lastButton === undefined || lastButton === null) return;
+    try {
+      await saveConfig({ mouse_trigger_button: lastButton });
+      setDiagnosticsMessage(`Saved button ${lastButton} as the trigger.`);
+    } catch (e) {
+      setDiagnosticsMessage(`Failed to save trigger button: ${String(e)}`);
+    }
+  }
+
+  async function openAccessibilitySettings() {
+    try {
+      await invoke("open_accessibility_settings");
+      setDiagnosticsMessage("Opened macOS Accessibility settings.");
+    } catch (e) {
+      setDiagnosticsMessage(String(e));
+    }
+  }
+
+  async function exportDiagnostics() {
+    try {
+      const result = await invoke<ExportedDiagnostics>("export_diagnostics_report");
+      setDiagnosticsMessage(`Diagnostics exported: ${result.path}`);
+    } catch (e) {
+      setDiagnosticsMessage(`Export failed: ${String(e)}`);
+    }
+  }
+
+  async function revealDiagnosticsFolder() {
+    try {
+      await invoke("reveal_diagnostics_folder");
+    } catch (e) {
+      setDiagnosticsMessage(`Reveal failed: ${String(e)}`);
+    }
   }
 
   function providerDraft(provider: ProviderConfig) {
@@ -131,12 +276,19 @@ export default function App() {
     field: keyof ProviderConfig,
     value: string | Record<string, unknown>
   ) {
+    const nextDraft = {
+      ...(providerDrafts()[provider.name] ?? provider),
+      [field]: value,
+    } as ProviderConfig;
     setProviderDrafts((prev) => ({
       ...prev,
-      [provider.name]: {
-        ...(prev[provider.name] ?? provider),
-        [field]: value,
-      },
+      [provider.name]: nextDraft,
+    }));
+    setProviderStatus((prev) => ({
+      ...prev,
+      [provider.name]: providerChanged(nextDraft, provider)
+        ? { status: "dirty", message: "Unsaved changes" }
+        : { status: "idle", message: "" },
     }));
   }
 
@@ -168,22 +320,36 @@ export default function App() {
 
     if (!providerChanged(draft, provider)) {
       clearProviderDraft(name);
+      setProviderStatus((prev) => ({
+        ...prev,
+        [name]: { status: "saved", message: "Saved" },
+      }));
       return true;
     }
 
-    await invoke("update_provider", {
-      name,
-      base_url: draft.base_url,
-      api_key: draft.api_key,
-      model: draft.model,
-      system_prompt: draft.system_prompt,
-      user_prompt: draft.user_prompt,
-      extra_params: draft.extra_params,
-    });
-    const updated = await invoke<AppConfig>("get_config");
-    mutate(updated);
-    clearProviderDraft(name);
-    return true;
+    setProviderStatus((prev) => ({
+      ...prev,
+      [name]: { status: "saving", message: "Saving..." },
+    }));
+
+    try {
+      await invoke("update_provider", buildUpdateProviderArgs(name, draft));
+      const updated = await invoke<AppConfig>("get_config");
+      mutate(updated);
+      clearProviderDraft(name);
+      setProviderStatus((prev) => ({
+        ...prev,
+        [name]: { status: "saved", message: "Saved" },
+      }));
+      await refreshDiagnostics();
+      return true;
+    } catch (e) {
+      setProviderStatus((prev) => ({
+        ...prev,
+        [name]: { status: "save_error", message: String(e) },
+      }));
+      return false;
+    }
   }
 
   function extraParamsValue(provider: ProviderConfig) {
@@ -195,6 +361,10 @@ export default function App() {
 
   function updateExtraParamsDraft(provider: ProviderConfig, raw: string) {
     setExtraParamDrafts((prev) => ({ ...prev, [provider.name]: raw }));
+    setProviderStatus((prev) => ({
+      ...prev,
+      [provider.name]: { status: "dirty", message: "Unsaved changes" },
+    }));
     try {
       updateProviderDraft(provider, "extra_params", JSON.parse(raw));
     } catch {
@@ -215,10 +385,10 @@ export default function App() {
       });
       return commitProvider(provider.name);
     } catch {
-      setTestResult((prev) => ({
+      setProviderStatus((prev) => ({
         ...prev,
         [provider.name]: {
-          status: "error",
+          status: "save_error",
           message: "Extra Parameters must be valid JSON before saving.",
         },
       }));
@@ -233,28 +403,76 @@ export default function App() {
       : await commitProvider(name);
     if (!committed) return;
 
-    setTestResult((prev) => ({
+    setProviderStatus((prev) => ({
       ...prev,
-      [name]: { status: "loading", message: "Testing..." },
+      [name]: { status: "testing", message: "Testing..." },
     }));
     try {
       const result = await invoke<string>("test_provider", {
         providerName: name,
       });
-      setTestResult((prev) => ({
+      setProviderStatus((prev) => ({
         ...prev,
-        [name]: { status: "success", message: result },
+        [name]: { status: "test_success", message: result },
       }));
     } catch (e) {
-      setTestResult((prev) => ({
+      setProviderStatus((prev) => ({
         ...prev,
-        [name]: { status: "error", message: String(e) },
+        [name]: { status: "test_error", message: String(e) },
       }));
+    }
+  }
+
+  function statusFor(provider: ProviderConfig): ProviderUiStatus {
+    const explicit = providerStatus()[provider.name];
+    if (explicit) return explicit;
+    const draft = providerDrafts()[provider.name];
+    if (draft && providerChanged(draft, provider)) {
+      return { status: "dirty", message: "Unsaved changes" };
+    }
+    return { status: "idle", message: "" };
+  }
+
+  function providerBusy(provider: ProviderConfig) {
+    const status = statusFor(provider).status;
+    return status === "saving" || status === "testing";
+  }
+
+  function providerStatusTone(status: ProviderStatus) {
+    if (status === "test_success" || status === "saved") return "text-green-500";
+    if (status === "test_error" || status === "save_error") return "text-red-500";
+    if (status === "dirty") return "text-amber-500";
+    return "text-gray-400";
+  }
+
+  function providerStatusLabel(status: ProviderStatus) {
+    switch (status) {
+      case "dirty":
+        return "Unsaved changes";
+      case "saving":
+        return "Saving...";
+      case "saved":
+        return "Saved";
+      case "save_error":
+        return "Save failed";
+      case "testing":
+        return "Testing...";
+      case "test_success":
+        return "Test OK";
+      case "test_error":
+        return "Test failed";
+      default:
+        return "";
     }
   }
 
   function formatTime(ts: number) {
     return new Date(ts * 1000).toLocaleString();
+  }
+
+  function formatMillis(ts?: number | null) {
+    if (!ts) return "Never";
+    return new Date(ts).toLocaleString();
   }
 
   async function checkForUpdates() {
@@ -323,7 +541,7 @@ export default function App() {
 
         {/* Tab bar */}
         <div class="flex gap-1 border-b border-gray-200 dark:border-gray-800">
-          <For each={["general", "providers", "history"] as const}>
+          <For each={["general", "providers", "diagnostics", "history"] as const}>
             {(tab) => (
               <button
                 class={`px-4 py-2 text-sm font-medium transition-colors cursor-pointer border-b-2 -mb-px ${
@@ -340,6 +558,8 @@ export default function App() {
                   ? "General"
                   : tab === "providers"
                   ? "Providers"
+                  : tab === "diagnostics"
+                  ? "Diagnostics"
                   : "History"}
               </button>
             )}
@@ -448,13 +668,13 @@ export default function App() {
                           <kbd class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[11px] font-mono">
                             Middle Click
                           </kbd>{" "}
-                          on selected text to translate
+                          on selected text to translate (button {cfg().mouse_trigger_button})
                         </div>
                         <div>
                           <kbd class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[11px] font-mono">
                             Cmd+Shift+T
                           </kbd>{" "}
-                          global shortcut to translate selection
+                          fallback shortcut to translate selection
                         </div>
                         <div>
                           <kbd class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[11px] font-mono">
@@ -514,29 +734,25 @@ export default function App() {
                               {PROVIDER_LABELS[provider.name] || provider.name}
                             </div>
                             <div class="flex items-center gap-2">
-                              <Show when={testResult()[provider.name]}>
+                              <Show when={providerStatusLabel(statusFor(provider).status)}>
                                 <span
-                                  class={`text-xs ${
-                                    testResult()[provider.name].status ===
-                                    "success"
-                                      ? "text-green-500"
-                                      : testResult()[provider.name].status ===
-                                        "error"
-                                      ? "text-red-500"
-                                      : "text-gray-400"
-                                  }`}
+                                  class={`text-xs ${providerStatusTone(
+                                    statusFor(provider).status
+                                  )}`}
                                 >
-                                  {testResult()[provider.name].status ===
-                                  "loading"
-                                    ? "Testing..."
-                                    : testResult()[provider.name].status ===
-                                      "success"
-                                    ? "OK"
-                                    : "Failed"}
+                                  {providerStatusLabel(statusFor(provider).status)}
                                 </span>
                               </Show>
                               <button
-                                class="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+                                class="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                disabled={providerBusy(provider)}
+                                onClick={() => commitExtraParams(provider)}
+                              >
+                                Save
+                              </button>
+                              <button
+                                class="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                                disabled={providerBusy(provider)}
                                 onClick={() => testProvider(provider.name)}
                               >
                                 Test
@@ -558,7 +774,6 @@ export default function App() {
                                     e.currentTarget.value
                                   )
                                 }
-                                onBlur={() => commitProvider(provider.name)}
                               />
                             </Show>
                             <div class="flex gap-2">
@@ -573,7 +788,6 @@ export default function App() {
                                     e.currentTarget.value
                                   )
                                 }
-                                onBlur={() => commitProvider(provider.name)}
                               />
                               <Show when={provider.name !== "deeplx"}>
                                 <input
@@ -587,7 +801,6 @@ export default function App() {
                                       e.currentTarget.value
                                     )
                                   }
-                                  onBlur={() => commitProvider(provider.name)}
                                 />
                               </Show>
                             </div>
@@ -639,7 +852,6 @@ export default function App() {
                                         e.currentTarget.value
                                       )
                                     }
-                                    onBlur={() => commitProvider(provider.name)}
                                   />
                                 </div>
 
@@ -663,7 +875,6 @@ export default function App() {
                                         e.currentTarget.value
                                       )
                                     }
-                                    onBlur={() => commitProvider(provider.name)}
                                   />
                                 </div>
 
@@ -686,29 +897,232 @@ export default function App() {
                                         e.currentTarget.value
                                       )
                                     }
-                                    onBlur={() => commitExtraParams(provider)}
                                   />
                                 </div>
                               </div>
                             </Show>
                           </Show>
 
-                          <Show when={testResult()[provider.name]?.message}>
+                          <Show when={statusFor(provider).message}>
                             <div
                               class={`mt-2 text-xs p-2 rounded ${
-                                testResult()[provider.name].status === "success"
+                                statusFor(provider).status === "test_success" ||
+                                statusFor(provider).status === "saved"
                                   ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
-                                  : testResult()[provider.name].status === "error"
+                                  : statusFor(provider).status === "test_error" ||
+                                    statusFor(provider).status === "save_error"
                                   ? "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
+                                  : statusFor(provider).status === "dirty"
+                                  ? "bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300"
                                   : "bg-gray-50 dark:bg-gray-800 text-gray-500"
                               }`}
                             >
-                              {testResult()[provider.name].message}
+                              {statusFor(provider).message}
                             </div>
                           </Show>
                         </div>
                       )}
                     </For>
+                  </div>
+                </Show>
+
+                {/* Diagnostics tab */}
+                <Show when={activeTab() === "diagnostics"}>
+                  <div class="space-y-4">
+                    <Show
+                      when={diagnostics()}
+                      fallback={
+                        <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 text-sm text-gray-500">
+                          Loading diagnostics...
+                        </div>
+                      }
+                    >
+                      {(diag) => (
+                        <>
+                          <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                            <div class="flex items-start justify-between gap-4 mb-4">
+                              <div>
+                                <div class="text-sm font-medium">Middle Click Test</div>
+                                <div
+                                  class={`mt-1 text-xs ${
+                                    diag().mouse.accessibility_trusted
+                                      ? "text-green-500"
+                                      : "text-red-500"
+                                  }`}
+                                >
+                                  Accessibility{" "}
+                                  {diag().mouse.accessibility_trusted
+                                    ? "Granted"
+                                    : "Missing"}
+                                </div>
+                              </div>
+                              <div class="flex gap-2">
+                                <button
+                                  class="text-xs px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+                                  onClick={openAccessibilitySettings}
+                                >
+                                  Open Permission
+                                </button>
+                                <button
+                                  class="text-xs px-3 py-2 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors cursor-pointer"
+                                  onClick={startMiddleClickTest}
+                                >
+                                  Start Test
+                                </button>
+                              </div>
+                            </div>
+
+                            <div class="grid grid-cols-2 gap-3 text-xs">
+                              <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
+                                <div class="text-gray-400 mb-1">Event Tap</div>
+                                <div class="font-mono">{diag().mouse.status}</div>
+                              </div>
+                              <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
+                                <div class="text-gray-400 mb-1">Trigger Button</div>
+                                <div class="font-mono">{cfg().mouse_trigger_button}</div>
+                              </div>
+                              <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
+                                <div class="text-gray-400 mb-1">Last Button</div>
+                                <div class="font-mono">
+                                  {diag().mouse.last_button ?? "None"}
+                                </div>
+                              </div>
+                              <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
+                                <div class="text-gray-400 mb-1">Last Trigger</div>
+                                <div class="font-mono">
+                                  {formatMillis(diag().mouse.last_trigger_at)}
+                                </div>
+                              </div>
+                            </div>
+
+                            <Show when={diag().mouse.last_pipeline_result}>
+                              <div class="mt-3 text-xs p-3 rounded bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-300">
+                                {diag().mouse.last_pipeline_result}
+                              </div>
+                            </Show>
+                            <Show when={diag().mouse.last_error}>
+                              <div class="mt-3 text-xs p-3 rounded bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300">
+                                {diag().mouse.last_error}
+                              </div>
+                            </Show>
+                            <Show
+                              when={
+                                diag().mouse.last_button !== undefined &&
+                                diag().mouse.last_button !== null &&
+                                diag().mouse.last_button !== cfg().mouse_trigger_button
+                              }
+                            >
+                              <button
+                                class="mt-3 text-xs px-3 py-2 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 rounded hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors cursor-pointer"
+                                onClick={saveLastMouseButton}
+                              >
+                                Use button {diag().mouse.last_button} as trigger
+                              </button>
+                            </Show>
+                          </div>
+
+                          <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                            <div class="text-sm font-medium mb-3">Provider Readiness</div>
+                            <div
+                              class={`text-xs p-3 rounded mb-3 ${
+                                diag().active_provider_ready
+                                  ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
+                                  : "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
+                              }`}
+                            >
+                              {diag().active_provider_ready
+                                ? "Active provider is ready"
+                                : diag().active_provider_reason ||
+                                  "Active provider is not ready"}
+                            </div>
+                            <div class="space-y-2">
+                              <For each={diag().providers}>
+                                {(provider) => (
+                                  <div class="flex items-center justify-between text-xs p-2 rounded bg-gray-50 dark:bg-gray-800">
+                                    <span>
+                                      {PROVIDER_LABELS[provider.name] ||
+                                        provider.name}
+                                      {provider.active ? " (active)" : ""}
+                                    </span>
+                                    <span
+                                      class={
+                                        provider.ready
+                                          ? "text-green-500"
+                                          : "text-red-500"
+                                      }
+                                    >
+                                      {provider.ready
+                                        ? "Ready"
+                                        : provider.reason || "Not ready"}
+                                    </span>
+                                  </div>
+                                )}
+                              </For>
+                            </div>
+                          </div>
+
+                          <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                            <div class="flex items-center justify-between gap-4 mb-4 pb-4 border-b border-gray-100 dark:border-gray-800">
+                              <div>
+                                <div class="text-sm font-medium">Debug Logging</div>
+                                <div class="text-xs text-gray-500 mt-1">
+                                  Extra local diagnostics for clipboard, trigger, and provider failures
+                                </div>
+                              </div>
+                              <button
+                                class={`w-11 h-6 rounded-full transition-colors cursor-pointer ${
+                                  cfg().debug_logging
+                                    ? "bg-blue-500"
+                                    : "bg-gray-300 dark:bg-gray-700"
+                                }`}
+                                onClick={() =>
+                                  saveConfig({
+                                    debug_logging: !cfg().debug_logging,
+                                  })
+                                }
+                              >
+                                <div
+                                  class={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
+                                    cfg().debug_logging
+                                      ? "translate-x-[22px]"
+                                      : "translate-x-[2px]"
+                                  }`}
+                                />
+                              </button>
+                            </div>
+                            <div class="flex items-center justify-between gap-4">
+                              <div>
+                                <div class="text-sm font-medium">Diagnostics Report</div>
+                                <div class="text-xs text-gray-500 mt-1 truncate max-w-[360px]">
+                                  {diag().log_dir || "Log directory unavailable"} ·{" "}
+                                  {Math.round(diag().log_max_file_size_bytes / 1024)}KB ×{" "}
+                                  {diag().log_rotation_keep_files + 1}
+                                </div>
+                              </div>
+                              <div class="flex gap-2">
+                                <button
+                                  class="text-xs px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+                                  onClick={revealDiagnosticsFolder}
+                                >
+                                  Reveal
+                                </button>
+                                <button
+                                  class="text-xs px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+                                  onClick={exportDiagnostics}
+                                >
+                                  Export
+                                </button>
+                              </div>
+                            </div>
+                            <Show when={diagnosticsMessage()}>
+                              <div class="mt-3 text-xs p-3 rounded bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-300 break-words">
+                                {diagnosticsMessage()}
+                              </div>
+                            </Show>
+                          </div>
+                        </>
+                      )}
+                    </Show>
                   </div>
                 </Show>
 

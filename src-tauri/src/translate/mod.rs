@@ -1,10 +1,10 @@
-pub mod provider;
-pub mod deeplx;
-pub mod openai_compat;
-pub mod gemini;
 pub mod claude;
-pub mod ollama;
 pub mod custom_http;
+pub mod deeplx;
+pub mod gemini;
+pub mod ollama;
+pub mod openai_compat;
+pub mod provider;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -100,15 +100,9 @@ impl TranslationEngine {
             }
         }
 
-        let provider = self
-            .providers
-            .get(&self.active_provider)
-            .ok_or_else(|| {
-                TranslateError::Config(format!(
-                    "Provider '{}' not found",
-                    self.active_provider
-                ))
-            })?;
+        let provider = self.providers.get(&self.active_provider).ok_or_else(|| {
+            TranslateError::Config(format!("Provider '{}' not found", self.active_provider))
+        })?;
 
         let result = provider.translate(text, from, to).await?;
 
@@ -127,15 +121,9 @@ impl TranslationEngine {
         from: &str,
         to: &str,
     ) -> Result<TranslateResult, TranslateError> {
-        let provider = self
-            .providers
-            .get(provider_name)
-            .ok_or_else(|| {
-                TranslateError::Config(format!(
-                    "Provider '{}' not found",
-                    provider_name
-                ))
-            })?;
+        let provider = self.providers.get(provider_name).ok_or_else(|| {
+            TranslateError::Config(format!("Provider '{}' not found", provider_name))
+        })?;
 
         provider.translate(text, from, to).await
     }

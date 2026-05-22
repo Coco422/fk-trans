@@ -123,7 +123,7 @@ export default function FloatingPopup() {
     <div class="w-full h-full flex items-start justify-start p-3 m-0 overflow-hidden">
       {/* Error state */}
       <Show when={error()}>
-        <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-2xl border border-red-200 dark:border-red-900 p-4 w-[376px] animate-fade-in">
+        <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-sm p-4 w-[376px] animate-fade-in">
           <div class="flex items-center gap-2 text-red-500 mb-2 cursor-move select-none" onMouseDown={startDrag}>
             <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -150,7 +150,7 @@ export default function FloatingPopup() {
 
       {/* Loading state */}
       <Show when={loading() && !data() && !error()}>
-        <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 p-4 w-[376px] animate-fade-in">
+        <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-sm p-4 w-[376px] animate-fade-in">
           <div class="flex items-center gap-3 mb-3 cursor-move select-none" onMouseDown={startDrag}>
             <div class="relative w-5 h-5">
               <div class="absolute inset-0 rounded-full border-2 border-blue-200 dark:border-blue-800" />
@@ -179,7 +179,7 @@ export default function FloatingPopup() {
       {/* Translation result */}
       <Show when={data()}>
         {(payload) => (
-          <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 p-4 w-[376px] animate-result-in">
+          <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-sm p-4 w-[376px] animate-result-in">
             {/* Language pair + provider */}
             <div class="flex items-center justify-between mb-2 cursor-move select-none" onMouseDown={startDrag}>
               <div class="text-xs text-gray-500 dark:text-gray-400 font-mono">

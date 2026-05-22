@@ -26,19 +26,29 @@ pub fn default_user_prompt() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub enabled: bool,
+    #[serde(default)]
+    pub debug_logging: bool,
     pub source_lang: String,
     pub target_lang: String,
     pub active_provider: String,
+    #[serde(default = "default_mouse_trigger_button")]
+    pub mouse_trigger_button: i64,
     pub providers: Vec<ProviderConfig>,
+}
+
+pub fn default_mouse_trigger_button() -> i64 {
+    2
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            debug_logging: false,
             source_lang: "auto".to_string(),
             target_lang: "zh".to_string(),
             active_provider: "openai".to_string(),
+            mouse_trigger_button: default_mouse_trigger_button(),
             providers: vec![
                 ProviderConfig {
                     name: "deeplx".into(),
@@ -171,11 +181,11 @@ pub fn load_config() -> AppConfig {
     }
 }
 
-pub fn save_config(config: &AppConfig) {
+pub fn save_config(config: &AppConfig) -> Result<(), String> {
     let path = config_path();
-    if let Ok(json) = serde_json::to_string_pretty(config) {
-        let _ = std::fs::write(path, json);
-    }
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("Failed to serialize config: {}", e))?;
+    std::fs::write(path, json).map_err(|e| format!("Failed to write config: {}", e))
 }
 
 #[cfg(test)]
@@ -192,6 +202,51 @@ mod tests {
             user_prompt: default_user_prompt(),
             extra_params: serde_json::json!({}),
         }
+    }
+
+    #[test]
+    fn mouse_trigger_button_defaults_to_middle_button() {
+        let config = AppConfig::default();
+
+        assert_eq!(config.mouse_trigger_button, 2);
+    }
+
+    #[test]
+    fn debug_logging_defaults_to_off() {
+        let config = AppConfig::default();
+
+        assert!(!config.debug_logging);
+    }
+
+    #[test]
+    fn legacy_config_without_mouse_trigger_button_uses_default() {
+        let json = r#"{
+            "enabled": true,
+            "source_lang": "auto",
+            "target_lang": "zh",
+            "active_provider": "openai",
+            "providers": []
+        }"#;
+
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.mouse_trigger_button, 2);
+        assert!(!config.debug_logging);
+    }
+
+    #[test]
+    fn debug_logging_and_mouse_trigger_button_round_trip_through_json() {
+        let config = AppConfig {
+            debug_logging: true,
+            mouse_trigger_button: 4,
+            ..AppConfig::default()
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: AppConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.mouse_trigger_button, 4);
+        assert!(loaded.debug_logging);
     }
 
     #[test]

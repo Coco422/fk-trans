@@ -25,8 +25,10 @@ export interface ProviderConfig {
 
 export interface AppConfig {
   enabled: boolean;
+  debug_logging: boolean;
   source_lang: string;
   target_lang: string;
   active_provider: string;
+  mouse_trigger_button: number;
   providers: ProviderConfig[];
 }

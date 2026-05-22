@@ -88,3 +88,11 @@ pub fn request_accessibility_permissions() -> bool {
         AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef())
     }
 }
+
+pub fn open_accessibility_settings() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .spawn()
+        .map_err(|e| format!("Failed to open Accessibility settings: {}", e))?;
+    Ok(())
+}

@@ -1,6 +1,6 @@
 {
   "name": "fk-trans",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "",
   "type": "module",
   "scripts": {
@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "serve": "vite preview",
+    "test:tauri-args": "node scripts/check-tauri-command-args.mjs",
     "tauri": "tauri",
     "release:mac": "scripts/release-mac.sh"
   },

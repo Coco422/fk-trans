@@ -15,8 +15,7 @@ pub fn get_cursor_position() -> CursorPosition {
 
     // CGEvent Y is bottom-up, convert to top-down
     let screen_height = CGDisplay::main().pixels_high() as f64;
-    let scale = CGDisplay::main().pixels_wide() as f64
-        / CGDisplay::main().bounds().size.width;
+    let scale = CGDisplay::main().pixels_wide() as f64 / CGDisplay::main().bounds().size.width;
 
     CursorPosition {
         x: point.x / scale,

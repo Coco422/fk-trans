@@ -41,10 +41,7 @@ impl TranslateProvider for DeepLXProvider {
             .map_err(|e| TranslateError::Network(e.to_string()))?;
 
         if !resp.status().is_success() {
-            return Err(TranslateError::Api(format!(
-                "HTTP {}",
-                resp.status()
-            )));
+            return Err(TranslateError::Api(format!("HTTP {}", resp.status())));
         }
 
         let json: serde_json::Value = resp

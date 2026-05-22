@@ -34,7 +34,9 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 let mut config = state.config.lock().unwrap();
                 config.enabled = !config.enabled;
                 let new_state = config.enabled;
-                config::save_config(&config);
+                if let Err(e) = config::save_config(&config) {
+                    log::error!("[tray] Failed to save enabled state: {}", e);
+                }
                 drop(config);
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.emit("config-changed", ());
