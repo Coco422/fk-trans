@@ -13,12 +13,17 @@ export default function FloatingPopup() {
   const [actionLoading, setActionLoading] = createSignal<string | null>(null);
 
   let hideTimeout: ReturnType<typeof setTimeout> | undefined;
+  let root: HTMLDivElement | undefined;
 
   function resetHideTimeout() {
     if (hideTimeout) clearTimeout(hideTimeout);
     hideTimeout = setTimeout(() => {
       hidePopup();
     }, 30_000);
+  }
+
+  function focusPopupRoot() {
+    queueMicrotask(() => root?.focus());
   }
 
   onMount(async () => {
@@ -31,6 +36,7 @@ export default function FloatingPopup() {
         setExtraResult("");
         setError(null);
         setLoading(false);
+        focusPopupRoot();
         resetHideTimeout();
       }
     );
@@ -40,18 +46,21 @@ export default function FloatingPopup() {
       setData(null);
       setError(null);
       setExtraResult("");
+      focusPopupRoot();
     });
 
     const unlistenError = await listen<string>("translation-error", (event) => {
       setError(event.payload);
       setLoading(false);
       setData(null);
+      focusPopupRoot();
     });
 
     const unlistenBlur = await win.onCloseRequested(() => {
       // prevent close, just hide
     });
 
+    window.addEventListener("keydown", handleKeydown);
     document.addEventListener("keydown", handleKeydown);
 
     onCleanup(() => {
@@ -59,6 +68,7 @@ export default function FloatingPopup() {
       unlistenLoading();
       unlistenError();
       unlistenBlur();
+      window.removeEventListener("keydown", handleKeydown);
       document.removeEventListener("keydown", handleKeydown);
       if (hideTimeout) clearTimeout(hideTimeout);
     });
@@ -66,6 +76,8 @@ export default function FloatingPopup() {
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
       hidePopup();
     }
   }
@@ -120,7 +132,12 @@ export default function FloatingPopup() {
   }
 
   return (
-    <div class="w-full h-full flex items-start justify-start p-3 m-0 overflow-hidden">
+    <div
+      ref={root}
+      tabIndex={0}
+      class="w-full h-full flex items-start justify-start p-3 m-0 overflow-hidden outline-none"
+      onMouseDown={focusPopupRoot}
+    >
       {/* Error state */}
       <Show when={error()}>
         <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-sm p-4 w-[376px] animate-fade-in">

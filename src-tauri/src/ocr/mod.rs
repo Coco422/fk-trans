@@ -258,6 +258,16 @@ impl OcrRuntime {
         state.last_result = None;
         state.last_error = Some(error.into());
     }
+
+    pub fn mark_screen_capture_error(&self, error: impl Into<String>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.screen_capture_ready = false;
+        state.last_result = None;
+        state.last_error = Some(error.into());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

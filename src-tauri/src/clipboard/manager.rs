@@ -20,6 +20,64 @@ pub struct ClipboardManager {
     capture_lock: tokio::sync::Mutex<()>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardCaptureError {
+    ClipboardAccess(String),
+    SentinelWriteFailed,
+    CopyShortcutFailed(String),
+    CopyShortcutTimedOut,
+    ClipboardUnchanged,
+    TextTooShort(usize),
+}
+
+impl ClipboardCaptureError {
+    pub fn user_message(&self) -> String {
+        match self {
+            ClipboardCaptureError::ClipboardAccess(_) => {
+                "Clipboard is unavailable. Check macOS permissions and try again.".to_string()
+            }
+            ClipboardCaptureError::SentinelWriteFailed => {
+                "Unable to prepare clipboard capture. Try again after selecting text.".to_string()
+            }
+            ClipboardCaptureError::CopyShortcutFailed(_) => {
+                "Unable to send Cmd+C to the active app. Check Accessibility permission."
+                    .to_string()
+            }
+            ClipboardCaptureError::CopyShortcutTimedOut => {
+                "Cmd+C capture timed out. Try again after selecting text in the target app."
+                    .to_string()
+            }
+            ClipboardCaptureError::ClipboardUnchanged => {
+                "No selected text captured. The target app did not respond to Cmd+C.".to_string()
+            }
+            ClipboardCaptureError::TextTooShort(_) => {
+                "Selected text is too short to translate.".to_string()
+            }
+        }
+    }
+
+    pub fn diagnostic_reason(&self) -> String {
+        match self {
+            ClipboardCaptureError::ClipboardAccess(error) => {
+                format!("Clipboard access failed: {}", error)
+            }
+            ClipboardCaptureError::SentinelWriteFailed => {
+                "Failed to write clipboard sentinel".to_string()
+            }
+            ClipboardCaptureError::CopyShortcutFailed(error) => {
+                format!("Cmd+C simulation failed: {}", error)
+            }
+            ClipboardCaptureError::CopyShortcutTimedOut => "Cmd+C simulation timed out".to_string(),
+            ClipboardCaptureError::ClipboardUnchanged => {
+                "Clipboard did not change after Cmd+C".to_string()
+            }
+            ClipboardCaptureError::TextTooShort(length) => {
+                format!("Captured text too short: {} chars", length)
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn macos_copy_key_sequence() -> [CopyKeyEvent; 4] {
     use core_graphics::event::KeyCode;
@@ -55,7 +113,7 @@ impl ClipboardManager {
         }
     }
 
-    pub async fn capture_selected_text(&self) -> Option<String> {
+    pub async fn capture_selected_text(&self) -> Result<String, ClipboardCaptureError> {
         log::debug!("[clipboard] Waiting for capture lock");
         let _guard = self.capture_lock.lock().await;
         log::info!("[clipboard] Starting capture");
@@ -66,7 +124,7 @@ impl ClipboardManager {
                 Ok(c) => c,
                 Err(e) => {
                     log::warn!("[clipboard] Failed to access clipboard: {}", e);
-                    return None;
+                    return Err(ClipboardCaptureError::ClipboardAccess(e.to_string()));
                 }
             };
             cb.get_text().unwrap_or_default()
@@ -80,7 +138,7 @@ impl ClipboardManager {
         log::debug!("[clipboard] Writing clipboard sentinel");
         if !Self::set_clipboard_text(&sentinel) {
             log::warn!("[clipboard] Failed to write sentinel");
-            return None;
+            return Err(ClipboardCaptureError::SentinelWriteFailed);
         }
 
         log::info!("[clipboard] Simulating Cmd+C");
@@ -89,7 +147,7 @@ impl ClipboardManager {
             Ok(Err(e)) => {
                 log::warn!("[clipboard] Cmd+C simulation failed: {}", e);
                 Self::restore_clipboard(&original_clipboard);
-                return None;
+                return Err(ClipboardCaptureError::CopyShortcutFailed(e));
             }
             Err(_) => {
                 log::error!(
@@ -97,7 +155,7 @@ impl ClipboardManager {
                     COPY_SHORTCUT_TIMEOUT.as_millis()
                 );
                 Self::restore_clipboard(&original_clipboard);
-                return None;
+                return Err(ClipboardCaptureError::CopyShortcutTimedOut);
             }
         }
         log::info!("[clipboard] Cmd+C sent, waiting for clipboard update");
@@ -119,22 +177,20 @@ impl ClipboardManager {
         // Validate
         if text == sentinel {
             log::warn!("[clipboard] Clipboard did not change after Cmd+C, skipping");
-            return None;
+            return Err(ClipboardCaptureError::ClipboardUnchanged);
         }
 
         if text.trim().len() < 2 {
-            log::warn!(
-                "[clipboard] Text too short ({}), skipping",
-                text.trim().len()
-            );
-            return None;
+            let length = text.trim().len();
+            log::warn!("[clipboard] Text too short ({}), skipping", length);
+            return Err(ClipboardCaptureError::TextTooShort(length));
         }
 
         log::info!(
             "[clipboard] Captured selected text length: {} chars",
             text.chars().count()
         );
-        Some(text)
+        Ok(text)
     }
 
     async fn send_copy_shortcut() -> Result<(), String> {
@@ -261,6 +317,17 @@ mod tests {
                     command_flag: false,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn clipboard_capture_errors_have_user_messages_and_diagnostics() {
+        let error = ClipboardCaptureError::ClipboardUnchanged;
+
+        assert!(error.user_message().contains("No selected text captured"));
+        assert_eq!(
+            error.diagnostic_reason(),
+            "Clipboard did not change after Cmd+C"
         );
     }
 }

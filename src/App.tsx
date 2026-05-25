@@ -78,6 +78,11 @@ interface DiagnosticsSnapshot {
   log_max_file_size_bytes: number;
   log_rotation_keep_files: number;
   accessibility_trusted: boolean;
+  permissions: {
+    accessibilityTrusted: boolean;
+    screenRecordingTrusted: boolean;
+    currentExecutablePath?: string | null;
+  };
   mouse: MouseTriggerState;
   ocr: {
     enabled: boolean;
@@ -104,6 +109,12 @@ interface DiagnosticsSnapshot {
 
 interface ExportedDiagnostics {
   path: string;
+}
+
+interface MacosDevPermissionTarget {
+  executablePath: string;
+  bundleIdentifier?: string | null;
+  codeIdentifier?: string | null;
 }
 
 const LANGUAGES = [
@@ -181,6 +192,10 @@ export default function App() {
           ? {
               ...prev,
               accessibility_trusted: event.payload.accessibility_trusted,
+              permissions: {
+                ...prev.permissions,
+                accessibilityTrusted: event.payload.accessibility_trusted,
+              },
               mouse: event.payload,
             }
           : prev
@@ -267,6 +282,30 @@ export default function App() {
       setDiagnosticsMessage("Opened macOS Screen Recording settings.");
     } catch (e) {
       setDiagnosticsMessage(String(e));
+    }
+  }
+
+  async function revealCurrentExecutable() {
+    try {
+      await invoke("reveal_current_executable");
+      setDiagnosticsMessage("Revealed the current dev executable in Finder.");
+    } catch (e) {
+      setDiagnosticsMessage(`Reveal failed: ${String(e)}`);
+    }
+  }
+
+  async function showDevPermissionTarget() {
+    try {
+      const target = await invoke<MacosDevPermissionTarget>(
+        "get_macos_dev_permission_target"
+      );
+      setDiagnosticsMessage(
+        `Dev executable: ${target.executablePath}${
+          target.codeIdentifier ? ` · code id ${target.codeIdentifier}` : ""
+        }`
+      );
+    } catch (e) {
+      setDiagnosticsMessage(`Target lookup failed: ${String(e)}`);
     }
   }
 
@@ -1073,6 +1112,70 @@ export default function App() {
                                 Use button {diag().mouse.last_button} as trigger
                               </button>
                             </Show>
+                          </div>
+
+                          <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                            <div class="flex items-start justify-between gap-4 mb-4">
+                              <div>
+                                <div class="text-sm font-medium">macOS Dev Permissions</div>
+                                <div class="text-xs text-gray-500 mt-1">
+                                  Add this dev executable in Privacy & Security, then restart npm run tauri dev.
+                                </div>
+                              </div>
+                              <div class="flex gap-2">
+                                <button
+                                  class="text-xs px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+                                  onClick={showDevPermissionTarget}
+                                >
+                                  Target
+                                </button>
+                                <button
+                                  class="text-xs px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+                                  onClick={revealCurrentExecutable}
+                                >
+                                  Reveal
+                                </button>
+                              </div>
+                            </div>
+
+                            <div class="grid grid-cols-2 gap-3 text-xs">
+                              <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
+                                <div class="text-gray-400 mb-1">Accessibility</div>
+                                <div
+                                  class={
+                                    diag().permissions.accessibilityTrusted
+                                      ? "text-green-500"
+                                      : "text-red-500"
+                                  }
+                                >
+                                  {diag().permissions.accessibilityTrusted
+                                    ? "Granted"
+                                    : "Missing"}
+                                </div>
+                              </div>
+                              <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
+                                <div class="text-gray-400 mb-1">Screen Recording</div>
+                                <div
+                                  class={
+                                    diag().permissions.screenRecordingTrusted
+                                      ? "text-green-500"
+                                      : "text-red-500"
+                                  }
+                                >
+                                  {diag().permissions.screenRecordingTrusted
+                                    ? "Granted"
+                                    : "Missing"}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div class="mt-3 text-xs p-3 rounded bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-300 break-all font-mono">
+                              {diag().permissions.currentExecutablePath || "Executable path unavailable"}
+                            </div>
+                            <div class="mt-3 text-xs text-gray-500 leading-relaxed">
+                              If the app picker does not show fk-trans, click +, press Cmd+Shift+G,
+                              paste the executable path above, and add it to Accessibility and Screen Recording.
+                            </div>
                           </div>
 
                           <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">

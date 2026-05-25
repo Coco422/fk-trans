@@ -17,7 +17,7 @@ use std::sync::{
 };
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
 use tokio::sync::RwLock;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use translate::provider::TranslateError;
 use translate::TranslationEngine;
 
@@ -27,6 +27,9 @@ const POPUP_SCREEN_MARGIN: f64 = 8.0;
 const LOG_MAX_FILE_SIZE_BYTES: u64 = 512 * 1024;
 const LOG_ROTATION_KEEP_FILES: usize = 4;
 const CLIPBOARD_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+const KEYBOARD_SHORTCUT_CAPTURE_DELAY: Duration = Duration::from_millis(160);
+const MACOS_ACCESSIBILITY_PERMISSION_MESSAGE: &str = "Accessibility permission is required to copy selected text. Add the current dev executable in System Settings > Privacy & Security > Accessibility, then restart npm run tauri dev.";
+const MACOS_SCREEN_RECORDING_PERMISSION_MESSAGE: &str = "Screen Recording permission is required for OCR. Add the current dev executable in System Settings > Privacy & Security > Screen Recording, then restart npm run tauri dev.";
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
@@ -157,6 +160,23 @@ fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         log::error!("[panic] {}", info);
     }));
+}
+
+fn capture_delay_for_source(source: TriggerSource) -> Duration {
+    match source {
+        TriggerSource::KeyboardShortcut => KEYBOARD_SHORTCUT_CAPTURE_DELAY,
+        TriggerSource::MouseMiddle | TriggerSource::OcrShortcut | TriggerSource::Test => {
+            Duration::ZERO
+        }
+    }
+}
+
+fn macos_accessibility_error(trusted: bool) -> Option<&'static str> {
+    if trusted {
+        None
+    } else {
+        Some(MACOS_ACCESSIBILITY_PERMISSION_MESSAGE)
+    }
 }
 
 fn translation_payload(
@@ -321,13 +341,35 @@ async fn run_translation_pipeline(
         return;
     }
 
-    // Show a visible loading state before clipboard capture so trigger failures are observable.
-    show_popup_at_cursor(&app, cursor_pos);
-    let _ = app.emit("translation-started", ());
+    #[cfg(target_os = "macos")]
+    if let Some(message) =
+        macos_accessibility_error(platform::macos::check_accessibility_permissions())
+    {
+        log::warn!("[pipeline] Accessibility permission missing before clipboard capture");
+        let _ = platform::macos::request_accessibility_permissions();
+        show_popup_error(&app, cursor_pos, message.to_string());
+        let state = app.state::<AppState>();
+        mouse::listener::mark_pipeline_result(
+            &state.mouse_trigger_state,
+            "Failed: accessibility permission missing",
+            Some(message.to_string()),
+        );
+        emit_mouse_trigger_state(&app);
+        return;
+    }
+
+    let capture_delay = capture_delay_for_source(source);
+    if !capture_delay.is_zero() {
+        log::debug!(
+            "[pipeline] Waiting {} ms for shortcut modifiers to release",
+            capture_delay.as_millis()
+        );
+        sleep(capture_delay).await;
+    }
 
     log::info!("[pipeline] Capturing selected text...");
     let text = match timeout(CLIPBOARD_CAPTURE_TIMEOUT, cm.capture_selected_text()).await {
-        Ok(Some(t)) => {
+        Ok(Ok(t)) => {
             log::info!(
                 "[pipeline] Captured text: chars={} hash={:016x}",
                 t.chars().count(),
@@ -335,17 +377,16 @@ async fn run_translation_pipeline(
             );
             t
         }
-        Ok(None) => {
-            log::warn!("[pipeline] No text captured, skipping");
-            let _ = app.emit(
-                "translation-error",
-                "No selected text captured. Select text in another app and try again.".to_string(),
-            );
+        Ok(Err(error)) => {
+            let user_message = error.user_message();
+            let diagnostic_reason = error.diagnostic_reason();
+            log::warn!("[pipeline] Clipboard capture failed: {}", diagnostic_reason);
+            show_popup_error(&app, cursor_pos, user_message);
             let state = app.state::<AppState>();
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
                 "Failed: no selected text captured",
-                Some("Clipboard capture did not return selected text".to_string()),
+                Some(diagnostic_reason),
             );
             emit_mouse_trigger_state(&app);
             return;
@@ -355,8 +396,9 @@ async fn run_translation_pipeline(
                 "[pipeline] Clipboard capture timed out after {} ms",
                 CLIPBOARD_CAPTURE_TIMEOUT.as_millis()
             );
-            let _ = app.emit(
-                "translation-error",
+            show_popup_error(
+                &app,
+                cursor_pos,
                 "Clipboard capture timed out. Try again after selecting text in the target app."
                     .to_string(),
             );
@@ -371,12 +413,16 @@ async fn run_translation_pipeline(
         }
     };
 
+    show_popup_at_cursor(&app, cursor_pos);
+    let _ = app.emit("translation-started", ());
+
     translate_and_emit(app, text, cursor_pos, CaptureMetadata::Clipboard).await;
 }
 
 fn validate_ocr_start_with_platform(
     config: &AppConfig,
     platform_ready: bool,
+    screen_recording_ready: bool,
 ) -> Result<(), String> {
     if !config.enabled {
         return Err("fk-trans is disabled".to_string());
@@ -386,6 +432,9 @@ fn validate_ocr_start_with_platform(
     }
     if !platform_ready {
         return Err("OCR is only implemented on macOS in this version".to_string());
+    }
+    if !screen_recording_ready {
+        return Err(MACOS_SCREEN_RECORDING_PERMISSION_MESSAGE.to_string());
     }
     config::validate_active_provider(config)
 }
@@ -419,13 +468,26 @@ async fn start_ocr_selection_pipeline(app: tauri::AppHandle, running: Arc<Atomic
     );
     emit_mouse_trigger_state(&app);
 
+    #[cfg(target_os = "macos")]
+    let screen_recording_ready = platform::macos::check_screen_recording_permissions();
+    #[cfg(not(target_os = "macos"))]
+    let screen_recording_ready = false;
+
     let readiness = {
         let config = state.config.lock().unwrap();
-        validate_ocr_start_with_platform(&config, cfg!(target_os = "macos"))
+        validate_ocr_start_with_platform(&config, cfg!(target_os = "macos"), screen_recording_ready)
     };
     if let Err(reason) = readiness {
         log::warn!("[ocr] OCR start skipped: {}", reason);
-        state.ocr_runtime.mark_error(reason.clone());
+        if !screen_recording_ready {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = platform::macos::request_screen_recording_permissions();
+            }
+            state.ocr_runtime.mark_screen_capture_error(reason.clone());
+        } else {
+            state.ocr_runtime.mark_error(reason.clone());
+        }
         show_popup_error(&app, cursor_pos, reason.clone());
         mouse::listener::mark_pipeline_result(
             &state.mouse_trigger_state,
@@ -714,6 +776,8 @@ pub fn run() {
             commands::diagnostics::export_diagnostics_report,
             commands::diagnostics::reveal_diagnostics_folder,
             commands::diagnostics::open_accessibility_settings,
+            commands::diagnostics::get_macos_dev_permission_target,
+            commands::diagnostics::reveal_current_executable,
             commands::diagnostics::log_frontend_event,
             commands::ocr::get_ocr_selection_payload,
             commands::ocr::complete_ocr_selection,
@@ -747,9 +811,52 @@ mod tests {
         };
 
         assert_eq!(
-            validate_ocr_start_with_platform(&config, true),
+            validate_ocr_start_with_platform(&config, true, true),
             Err("OCR shortcut is disabled".to_string())
         );
+    }
+
+    #[test]
+    fn ocr_requires_screen_recording_before_provider_validation() {
+        let config = AppConfig {
+            providers: vec![config::ProviderConfig {
+                name: "deeplx".to_string(),
+                base_url: "http://127.0.0.1:1188".to_string(),
+                api_key: String::new(),
+                model: String::new(),
+                system_prompt: String::new(),
+                user_prompt: String::new(),
+                extra_params: serde_json::json!({}),
+            }],
+            active_provider: "deeplx".to_string(),
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            validate_ocr_start_with_platform(&config, true, false),
+            Err(MACOS_SCREEN_RECORDING_PERMISSION_MESSAGE.to_string())
+        );
+    }
+
+    #[test]
+    fn keyboard_shortcut_waits_before_clipboard_capture() {
+        assert_eq!(
+            capture_delay_for_source(TriggerSource::KeyboardShortcut),
+            KEYBOARD_SHORTCUT_CAPTURE_DELAY
+        );
+        assert_eq!(
+            capture_delay_for_source(TriggerSource::MouseMiddle),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn accessibility_error_blocks_clipboard_capture_when_missing() {
+        assert_eq!(
+            macos_accessibility_error(false),
+            Some(MACOS_ACCESSIBILITY_PERMISSION_MESSAGE)
+        );
+        assert_eq!(macos_accessibility_error(true), None);
     }
 
     #[test]

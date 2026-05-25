@@ -104,3 +104,44 @@ pub fn open_screen_recording_settings() -> Result<(), String> {
         .map_err(|e| format!("Failed to open Screen Recording settings: {}", e))?;
     Ok(())
 }
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
+}
+
+pub fn check_screen_recording_permissions() -> bool {
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+pub fn request_screen_recording_permissions() -> bool {
+    unsafe { CGRequestScreenCaptureAccess() }
+}
+
+pub fn current_executable_path() -> Option<std::path::PathBuf> {
+    std::env::current_exe().ok()
+}
+
+pub fn current_code_identifier(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("codesign")
+        .args(["-dv", "--verbose=4"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stderr);
+    text.lines()
+        .find_map(|line| line.strip_prefix("Identifier="))
+        .map(ToOwned::to_owned)
+}
+
+pub fn reveal_current_executable() -> Result<(), String> {
+    let path = current_executable_path()
+        .ok_or_else(|| "Unable to resolve current executable path".to_string())?;
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("Failed to reveal current executable: {}", e))?;
+    Ok(())
+}

@@ -10,6 +10,10 @@ const ocrOverlaySource = readFileSync(
   join(root, "src", "components", "OcrSelectionOverlay.tsx"),
   "utf8"
 );
+const popupSource = readFileSync(
+  join(root, "src", "components", "FloatingPopup.tsx"),
+  "utf8"
+);
 
 assert.match(
   appSource,
@@ -37,4 +41,34 @@ assert.doesNotMatch(
   ocrOverlaySource,
   /invoke\("complete_ocr_selection",\s*\{[\s\S]*?session_id:/,
   "complete_ocr_selection cannot pass snake_case session_id"
+);
+
+assert.match(
+  appSource,
+  /invoke<MacosDevPermissionTarget>\(\s*"get_macos_dev_permission_target"\s*\)/,
+  "Diagnostics must invoke get_macos_dev_permission_target without args"
+);
+
+assert.match(
+  appSource,
+  /invoke\("reveal_current_executable"\)/,
+  "Diagnostics must expose reveal_current_executable"
+);
+
+assert.match(
+  popupSource,
+  /tabIndex=\{0\}/,
+  "FloatingPopup root must be focusable for Escape handling"
+);
+
+assert.match(
+  popupSource,
+  /window\.addEventListener\("keydown",\s*handleKeydown\)/,
+  "FloatingPopup must listen for window keydown"
+);
+
+assert.match(
+  popupSource,
+  /e\.key === "Escape"[\s\S]*hidePopup\(\)/,
+  "FloatingPopup Escape handler must hide the popup"
 );

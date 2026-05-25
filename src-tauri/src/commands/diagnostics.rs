@@ -28,6 +28,7 @@ pub struct DiagnosticsSnapshot {
     pub log_max_file_size_bytes: u64,
     pub log_rotation_keep_files: usize,
     pub accessibility_trusted: bool,
+    pub permissions: PermissionDiagnostic,
     pub mouse: MouseTriggerState,
     pub ocr: OcrDiagnostic,
     pub active_provider_ready: bool,
@@ -38,6 +39,22 @@ pub struct DiagnosticsSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedDiagnostics {
     pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionDiagnostic {
+    pub accessibility_trusted: bool,
+    pub screen_recording_trusted: bool,
+    pub current_executable_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MacosDevPermissionTarget {
+    pub executable_path: String,
+    pub bundle_identifier: Option<String>,
+    pub code_identifier: Option<String>,
 }
 
 fn provider_diagnostics(config: &AppConfig) -> Vec<ProviderDiagnostic> {
@@ -171,6 +188,11 @@ debug_logging: {}
 log_max_file_size_bytes: {}
 log_rotation_keep_files: {}
 
+permissions:
+  accessibility_trusted: {}
+  screen_recording_trusted: {}
+  current_executable_path: {}
+
 mouse_trigger:
   status: {:?}
   accessibility_trusted: {}
@@ -208,6 +230,13 @@ recent_logs:
         snapshot.debug_logging,
         snapshot.log_max_file_size_bytes,
         snapshot.log_rotation_keep_files,
+        snapshot.permissions.accessibility_trusted,
+        snapshot.permissions.screen_recording_trusted,
+        snapshot
+            .permissions
+            .current_executable_path
+            .as_deref()
+            .unwrap_or("unknown"),
         snapshot.mouse.status,
         snapshot.mouse.accessibility_trusted,
         snapshot.mouse.trigger_button,
@@ -267,6 +296,7 @@ fn current_snapshot(app: &AppHandle, state: &AppState) -> DiagnosticsSnapshot {
     }
 
     let active_readiness = config::validate_active_provider(&config);
+    let permissions = current_permissions();
 
     DiagnosticsSnapshot {
         app_version: app.package_info().version.to_string(),
@@ -275,11 +305,34 @@ fn current_snapshot(app: &AppHandle, state: &AppState) -> DiagnosticsSnapshot {
         log_max_file_size_bytes: crate::LOG_MAX_FILE_SIZE_BYTES,
         log_rotation_keep_files: crate::LOG_ROTATION_KEEP_FILES,
         accessibility_trusted: mouse.accessibility_trusted,
+        permissions,
         mouse,
         ocr: state.ocr_runtime.snapshot(config.ocr_enabled),
         active_provider_ready: active_readiness.is_ok(),
         active_provider_reason: active_readiness.err(),
         providers: provider_diagnostics(&config),
+    }
+}
+
+fn current_permissions() -> PermissionDiagnostic {
+    #[cfg(target_os = "macos")]
+    {
+        PermissionDiagnostic {
+            accessibility_trusted: crate::platform::macos::check_accessibility_permissions(),
+            screen_recording_trusted: crate::platform::macos::check_screen_recording_permissions(),
+            current_executable_path: crate::platform::macos::current_executable_path()
+                .map(|path| path.display().to_string()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        PermissionDiagnostic {
+            accessibility_trusted: false,
+            screen_recording_trusted: false,
+            current_executable_path: std::env::current_exe()
+                .ok()
+                .map(|path| path.display().to_string()),
+        }
     }
 }
 
@@ -346,6 +399,38 @@ pub fn open_accessibility_settings() -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     {
         Err("Accessibility settings shortcut is only available on macOS".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn get_macos_dev_permission_target() -> Result<MacosDevPermissionTarget, String> {
+    let path = std::env::current_exe()
+        .map_err(|e| format!("Unable to resolve current executable: {}", e))?;
+    let executable_path = path.display().to_string();
+
+    #[cfg(target_os = "macos")]
+    let code_identifier = crate::platform::macos::current_code_identifier(&path);
+    #[cfg(not(target_os = "macos"))]
+    let code_identifier = None;
+
+    Ok(MacosDevPermissionTarget {
+        executable_path,
+        bundle_identifier: None,
+        code_identifier,
+    })
+}
+
+#[tauri::command]
+pub fn reveal_current_executable() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::platform::macos::reveal_current_executable()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let path = std::env::current_exe()
+            .map_err(|e| format!("Unable to resolve current executable: {}", e))?;
+        open_path(&path)
     }
 }
 
@@ -441,5 +526,12 @@ provider error sk-secret-value
         assert!(!redacted.contains("sk-secret-value"));
         assert!(!redacted.contains("private selected text"));
         assert!(redacted.contains("[redacted-api-key]"));
+    }
+
+    #[test]
+    fn diagnostics_reports_current_executable_path() {
+        let permissions = current_permissions();
+
+        assert!(permissions.current_executable_path.is_some());
     }
 }
