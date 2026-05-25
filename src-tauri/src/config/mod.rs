@@ -30,6 +30,8 @@ pub struct AppConfig {
     pub debug_logging: bool,
     #[serde(default = "default_ocr_enabled")]
     pub ocr_enabled: bool,
+    #[serde(default = "default_selection_trigger_enabled")]
+    pub selection_trigger_enabled: bool,
     pub source_lang: String,
     pub target_lang: String,
     pub active_provider: String,
@@ -46,12 +48,17 @@ pub fn default_ocr_enabled() -> bool {
     true
 }
 
+pub fn default_selection_trigger_enabled() -> bool {
+    true
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             debug_logging: false,
             ocr_enabled: default_ocr_enabled(),
+            selection_trigger_enabled: default_selection_trigger_enabled(),
             source_lang: "auto".to_string(),
             target_lang: "zh".to_string(),
             active_provider: "openai".to_string(),
@@ -223,6 +230,7 @@ mod tests {
         let config = AppConfig::default();
 
         assert!(!config.debug_logging);
+        assert!(config.selection_trigger_enabled);
     }
 
     #[test]
@@ -240,6 +248,7 @@ mod tests {
         assert_eq!(config.mouse_trigger_button, 2);
         assert!(!config.debug_logging);
         assert!(config.ocr_enabled);
+        assert!(config.selection_trigger_enabled);
     }
 
     #[test]
@@ -247,6 +256,7 @@ mod tests {
         let config = AppConfig {
             debug_logging: true,
             ocr_enabled: false,
+            selection_trigger_enabled: false,
             mouse_trigger_button: 4,
             ..AppConfig::default()
         };
@@ -257,6 +267,7 @@ mod tests {
         assert_eq!(loaded.mouse_trigger_button, 4);
         assert!(loaded.debug_logging);
         assert!(!loaded.ocr_enabled);
+        assert!(!loaded.selection_trigger_enabled);
     }
 
     #[test]

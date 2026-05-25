@@ -8,17 +8,17 @@ pub struct CursorPosition {
     pub y: f64,
 }
 
-pub fn get_cursor_position() -> CursorPosition {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).unwrap();
-    let event = CGEvent::new(source).unwrap();
+pub fn get_cursor_position() -> Option<CursorPosition> {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
+    let event = CGEvent::new(source).ok()?;
     let point = event.location();
 
     // CGEvent Y is bottom-up, convert to top-down
     let screen_height = CGDisplay::main().pixels_high() as f64;
     let scale = CGDisplay::main().pixels_wide() as f64 / CGDisplay::main().bounds().size.width;
 
-    CursorPosition {
+    Some(CursorPosition {
         x: point.x / scale,
         y: (screen_height - point.y) / scale,
-    }
+    })
 }

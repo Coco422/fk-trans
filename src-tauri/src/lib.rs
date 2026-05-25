@@ -28,6 +28,7 @@ const LOG_MAX_FILE_SIZE_BYTES: u64 = 512 * 1024;
 const LOG_ROTATION_KEEP_FILES: usize = 4;
 const CLIPBOARD_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 const KEYBOARD_SHORTCUT_CAPTURE_DELAY: Duration = Duration::from_millis(160);
+const SELECTION_CAPTURE_SETTLE_DELAY: Duration = Duration::from_millis(120);
 const MACOS_ACCESSIBILITY_PERMISSION_MESSAGE: &str = "Accessibility permission is required to copy selected text. Add the current dev executable in System Settings > Privacy & Security > Accessibility, then restart npm run tauri dev.";
 const MACOS_SCREEN_RECORDING_PERMISSION_MESSAGE: &str = "Screen Recording permission is required for OCR. Add the current dev executable in System Settings > Privacy & Security > Screen Recording, then restart npm run tauri dev.";
 
@@ -65,8 +66,12 @@ fn current_cursor_position(app: &tauri::AppHandle) -> PhysicalPosition<f64> {
         Ok(pos) => pos,
         Err(e) => {
             log::warn!("[pipeline] Failed to read cursor via Tauri: {}", e);
-            let pos = mouse::cursor::get_cursor_position();
-            PhysicalPosition::new(pos.x, pos.y)
+            mouse::cursor::get_cursor_position()
+                .map(|pos| PhysicalPosition::new(pos.x, pos.y))
+                .unwrap_or_else(|| {
+                    log::warn!("[pipeline] Failed to read cursor via CoreGraphics fallback");
+                    PhysicalPosition::new(0.0, 0.0)
+                })
         }
     }
 }
@@ -165,9 +170,10 @@ fn install_panic_hook() {
 fn capture_delay_for_source(source: TriggerSource) -> Duration {
     match source {
         TriggerSource::KeyboardShortcut => KEYBOARD_SHORTCUT_CAPTURE_DELAY,
-        TriggerSource::MouseMiddle | TriggerSource::OcrShortcut | TriggerSource::Test => {
-            Duration::ZERO
-        }
+        TriggerSource::MouseMiddle
+        | TriggerSource::MouseSelection
+        | TriggerSource::OcrShortcut
+        | TriggerSource::Test => Duration::ZERO,
     }
 }
 
@@ -274,6 +280,7 @@ async fn run_translation_pipeline(
     running: Arc<AtomicBool>,
     source: TriggerSource,
 ) {
+    let is_selection_source = source == TriggerSource::MouseSelection;
     if running
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -303,7 +310,10 @@ async fn run_translation_pipeline(
     // Check if enabled and locally usable before touching the clipboard.
     let readiness = {
         let state = app.state::<AppState>();
-        let config = state.config.lock().unwrap();
+        let config = state
+            .config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !config.enabled {
             log::info!("[pipeline] Disabled, skipping");
             mouse::listener::mark_pipeline_result(
@@ -326,6 +336,17 @@ async fn run_translation_pipeline(
 
     if let Err(reason) = readiness {
         log::warn!("[pipeline] No available provider: {}", reason);
+        if is_selection_source {
+            let state = app.state::<AppState>();
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                "Skipped: selection trigger ignored because provider is not ready",
+                Some(reason),
+            );
+            emit_mouse_trigger_state(&app);
+            return;
+        }
+
         show_popup_error(
             &app,
             cursor_pos,
@@ -347,8 +368,18 @@ async fn run_translation_pipeline(
     {
         log::warn!("[pipeline] Accessibility permission missing before clipboard capture");
         let _ = platform::macos::request_accessibility_permissions();
-        show_popup_error(&app, cursor_pos, message.to_string());
         let state = app.state::<AppState>();
+        if is_selection_source {
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                "Skipped: selection trigger ignored because Accessibility permission is missing",
+                Some(message.to_string()),
+            );
+            emit_mouse_trigger_state(&app);
+            return;
+        }
+
+        show_popup_error(&app, cursor_pos, message.to_string());
         mouse::listener::mark_pipeline_result(
             &state.mouse_trigger_state,
             "Failed: accessibility permission missing",
@@ -358,10 +389,14 @@ async fn run_translation_pipeline(
         return;
     }
 
-    let capture_delay = capture_delay_for_source(source);
+    let capture_delay = if is_selection_source {
+        SELECTION_CAPTURE_SETTLE_DELAY
+    } else {
+        capture_delay_for_source(source)
+    };
     if !capture_delay.is_zero() {
         log::debug!(
-            "[pipeline] Waiting {} ms for shortcut modifiers to release",
+            "[pipeline] Waiting {} ms before clipboard capture",
             capture_delay.as_millis()
         );
         sleep(capture_delay).await;
@@ -381,8 +416,18 @@ async fn run_translation_pipeline(
             let user_message = error.user_message();
             let diagnostic_reason = error.diagnostic_reason();
             log::warn!("[pipeline] Clipboard capture failed: {}", diagnostic_reason);
-            show_popup_error(&app, cursor_pos, user_message);
             let state = app.state::<AppState>();
+            if is_selection_source {
+                mouse::listener::mark_pipeline_result(
+                    &state.mouse_trigger_state,
+                    "Ignored: selection drag produced no captured text",
+                    Some(diagnostic_reason),
+                );
+                emit_mouse_trigger_state(&app);
+                return;
+            }
+
+            show_popup_error(&app, cursor_pos, user_message);
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
                 "Failed: no selected text captured",
@@ -396,13 +441,23 @@ async fn run_translation_pipeline(
                 "[pipeline] Clipboard capture timed out after {} ms",
                 CLIPBOARD_CAPTURE_TIMEOUT.as_millis()
             );
+            let state = app.state::<AppState>();
+            if is_selection_source {
+                mouse::listener::mark_pipeline_result(
+                    &state.mouse_trigger_state,
+                    "Ignored: selection clipboard capture timed out",
+                    Some("Clipboard capture timeout".to_string()),
+                );
+                emit_mouse_trigger_state(&app);
+                return;
+            }
+
             show_popup_error(
                 &app,
                 cursor_pos,
                 "Clipboard capture timed out. Try again after selecting text in the target app."
                     .to_string(),
             );
-            let state = app.state::<AppState>();
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
                 "Failed: clipboard capture timed out",
@@ -643,8 +698,10 @@ pub fn run() {
             let active_provider = config.active_provider.clone();
             let provider_configs = config.providers.clone();
             let ocr_enabled = config.ocr_enabled;
-            let mouse_trigger_state =
-                mouse::listener::new_shared_state(config.mouse_trigger_button);
+            let mouse_trigger_state = mouse::listener::new_shared_state_with_options(
+                config.mouse_trigger_button,
+                config.selection_trigger_enabled,
+            );
             let pipeline_running = Arc::new(AtomicBool::new(false));
 
             app.manage(AppState {
@@ -661,7 +718,9 @@ pub fn run() {
             });
 
             // Create system tray
-            tray::menu::create_tray(app.handle()).expect("Failed to create tray");
+            if let Err(e) = tray::menu::create_tray(app.handle()) {
+                log::error!("[tray] Failed to create tray: {}", e);
+            }
 
             // Configure popup window as non-activating on macOS
             #[cfg(target_os = "macos")]
@@ -684,7 +743,7 @@ pub fn run() {
             app.state::<AppState>()
                 .mouse_listener
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .replace(listener);
 
             let app_handle_clone = app_handle.clone();
@@ -696,9 +755,10 @@ pub fn run() {
                 match rx.recv() {
                     Ok(event) => {
                         log::info!(
-                            "[mouse] Event delivered to pipeline receiver: button={} trigger={} ts={}",
+                            "[mouse] Event delivered to pipeline receiver: button={} trigger={} source={:?} ts={}",
                             event.button,
                             event.is_trigger,
+                            event.source,
                             event.timestamp_ms
                         );
                         let app = app_handle_clone.clone();
@@ -712,7 +772,7 @@ pub fn run() {
                             app,
                             cm,
                             running,
-                            TriggerSource::MouseMiddle,
+                            event.source,
                         ));
                     }
                     Err(e) => {
@@ -846,6 +906,10 @@ mod tests {
         );
         assert_eq!(
             capture_delay_for_source(TriggerSource::MouseMiddle),
+            Duration::ZERO
+        );
+        assert_eq!(
+            capture_delay_for_source(TriggerSource::MouseSelection),
             Duration::ZERO
         );
     }

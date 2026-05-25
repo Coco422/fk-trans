@@ -24,6 +24,7 @@ pub enum MouseTriggerStatus {
 #[serde(rename_all = "snake_case")]
 pub enum TriggerSource {
     MouseMiddle,
+    MouseSelection,
     KeyboardShortcut,
     OcrShortcut,
     Test,
@@ -34,6 +35,7 @@ pub struct MouseTriggerState {
     pub status: MouseTriggerStatus,
     pub accessibility_trusted: bool,
     pub trigger_button: i64,
+    pub selection_trigger_enabled: bool,
     pub last_button: Option<i64>,
     pub last_event_at: Option<i64>,
     pub last_trigger_at: Option<i64>,
@@ -48,6 +50,7 @@ pub struct MouseTriggerState {
 pub struct MouseTriggerEvent {
     pub button: i64,
     pub is_trigger: bool,
+    pub source: TriggerSource,
     pub timestamp_ms: i64,
 }
 
@@ -55,12 +58,63 @@ pub struct MouseListener {
     running: Arc<AtomicBool>,
 }
 
+const SELECTION_DRAG_MIN_DISTANCE_PX: f64 = 8.0;
+const SELECTION_DRAG_MIN_DURATION_MS: i64 = 80;
+const SELECTION_TRIGGER_COOLDOWN_MS: i64 = 700;
+
+#[derive(Debug, Clone, Copy)]
+struct DragPoint {
+    x: f64,
+    y: f64,
+    timestamp_ms: i64,
+}
+
+#[derive(Debug, Default)]
+struct SelectionDragTracker {
+    start: Option<DragPoint>,
+    last_trigger_at: Option<i64>,
+}
+
+fn drag_distance(a: DragPoint, b: DragPoint) -> f64 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    (dx * dx + dy * dy).sqrt()
+}
+
+fn is_selection_drag(
+    start: DragPoint,
+    end: DragPoint,
+    last_trigger_at: Option<i64>,
+    enabled: bool,
+) -> bool {
+    if !enabled {
+        return false;
+    }
+
+    if drag_distance(start, end) < SELECTION_DRAG_MIN_DISTANCE_PX {
+        return false;
+    }
+
+    if end.timestamp_ms - start.timestamp_ms < SELECTION_DRAG_MIN_DURATION_MS {
+        return false;
+    }
+
+    if let Some(last) = last_trigger_at {
+        if end.timestamp_ms - last < SELECTION_TRIGGER_COOLDOWN_MS {
+            return false;
+        }
+    }
+
+    true
+}
+
 impl MouseTriggerState {
-    pub fn new(trigger_button: i64) -> Self {
+    pub fn new(trigger_button: i64, selection_trigger_enabled: bool) -> Self {
         Self {
             status: MouseTriggerStatus::Starting,
             accessibility_trusted: false,
             trigger_button,
+            selection_trigger_enabled,
             last_button: None,
             last_event_at: None,
             last_trigger_at: None,
@@ -77,8 +131,14 @@ pub fn now_millis() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
-pub fn new_shared_state(trigger_button: i64) -> SharedMouseTriggerState {
-    Arc::new(Mutex::new(MouseTriggerState::new(trigger_button)))
+pub fn new_shared_state_with_options(
+    trigger_button: i64,
+    selection_trigger_enabled: bool,
+) -> SharedMouseTriggerState {
+    Arc::new(Mutex::new(MouseTriggerState::new(
+        trigger_button,
+        selection_trigger_enabled,
+    )))
 }
 
 pub fn snapshot(state: &SharedMouseTriggerState) -> MouseTriggerState {
@@ -94,6 +154,17 @@ pub fn set_trigger_button(state: &SharedMouseTriggerState, button: i64) {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.trigger_button = button;
     guard.last_pipeline_result = Some(format!("Trigger button set to {}", button));
+}
+
+pub fn set_selection_trigger_enabled(state: &SharedMouseTriggerState, enabled: bool) {
+    let mut guard = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.selection_trigger_enabled = enabled;
+    guard.last_pipeline_result = Some(format!(
+        "Selection trigger {}",
+        if enabled { "enabled" } else { "disabled" }
+    ));
 }
 
 pub fn start_test_window(state: &SharedMouseTriggerState, duration_ms: i64) -> MouseTriggerState {
@@ -166,6 +237,8 @@ impl Drop for MouseListener {
 enum MacosTapEventKind {
     TapDisabled,
     OtherMouseDown,
+    LeftMouseDown,
+    LeftMouseUp,
     Ignored,
     Invalid,
 }
@@ -182,7 +255,11 @@ fn classify_macos_tap_event(
             MacosTapEventKind::TapDisabled
         }
         CGEventType::OtherMouseDown if event_is_null => MacosTapEventKind::Invalid,
+        CGEventType::LeftMouseDown if event_is_null => MacosTapEventKind::Invalid,
+        CGEventType::LeftMouseUp if event_is_null => MacosTapEventKind::Invalid,
         CGEventType::OtherMouseDown => MacosTapEventKind::OtherMouseDown,
+        CGEventType::LeftMouseDown => MacosTapEventKind::LeftMouseDown,
+        CGEventType::LeftMouseUp => MacosTapEventKind::LeftMouseUp,
         _ => MacosTapEventKind::Ignored,
     }
 }
@@ -193,6 +270,7 @@ struct RawMouseTapContext {
     restart_requested: Arc<AtomicBool>,
     tx: Sender<MouseTriggerEvent>,
     state: SharedMouseTriggerState,
+    drag_tracker: Arc<Mutex<SelectionDragTracker>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -208,6 +286,7 @@ impl RawMacosEventTap {
         tx: Sender<MouseTriggerEvent>,
         restart_requested: Arc<AtomicBool>,
         state: SharedMouseTriggerState,
+        drag_tracker: Arc<Mutex<SelectionDragTracker>>,
     ) -> Result<Self, ()> {
         use core_foundation::base::TCFType;
         use core_foundation::mach_port::CFMachPort;
@@ -221,9 +300,12 @@ impl RawMacosEventTap {
             restart_requested,
             tx,
             state,
+            drag_tracker,
         });
         let context_ptr = Box::into_raw(context);
-        let event_mask = 1u64 << CGEventType::OtherMouseDown as CGEventMask;
+        let event_mask = (1u64 << CGEventType::OtherMouseDown as CGEventMask)
+            | (1u64 << CGEventType::LeftMouseDown as CGEventMask)
+            | (1u64 << CGEventType::LeftMouseUp as CGEventMask);
 
         let tap_ref = unsafe {
             CGEventTapCreate(
@@ -305,7 +387,6 @@ fn handle_raw_macos_tap_event(
     event: core_graphics::sys::CGEventRef,
 ) {
     use core_foundation::runloop::CFRunLoop;
-    use core_graphics::event::{CGEventType, EventField};
 
     match classify_macos_tap_event(event_type, event.is_null()) {
         MacosTapEventKind::TapDisabled => {
@@ -326,55 +407,163 @@ fn handle_raw_macos_tap_event(
             log::warn!("[mouse] Ignoring macOS {:?} with null event", event_type);
         }
         MacosTapEventKind::Ignored => {}
-        MacosTapEventKind::OtherMouseDown => {
-            if !context.running.load(Ordering::SeqCst)
-                || !matches!(event_type, CGEventType::OtherMouseDown)
-            {
-                return;
-            }
+        MacosTapEventKind::OtherMouseDown => handle_macos_other_mouse_down(context, event),
+        MacosTapEventKind::LeftMouseDown => handle_macos_left_mouse_down(context, event),
+        MacosTapEventKind::LeftMouseUp => handle_macos_left_mouse_up(context, event),
+    }
+}
 
-            let button = unsafe {
-                CGEventGetIntegerValueField(event, EventField::MOUSE_EVENT_BUTTON_NUMBER)
-            };
-            let timestamp_ms = now_millis();
-            let is_trigger = {
-                let mut guard = context
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let is_trigger = button == guard.trigger_button;
-                guard.status = MouseTriggerStatus::EventReceived;
-                guard.accessibility_trusted = true;
-                guard.last_button = Some(button);
-                guard.last_event_at = Some(timestamp_ms);
-                guard.last_error = None;
-                if is_trigger {
-                    guard.last_trigger_at = Some(timestamp_ms);
-                    guard.last_pipeline_result =
-                        Some(format!("Trigger button {} received", button));
-                } else if guard
-                    .test_active_until
-                    .is_some_and(|until| until > timestamp_ms)
-                {
-                    guard.last_pipeline_result = Some(format!(
-                        "Received button {}, configured trigger is {}",
-                        button, guard.trigger_button
-                    ));
-                }
-                is_trigger
-            };
+#[cfg(target_os = "macos")]
+fn handle_macos_other_mouse_down(
+    context: &RawMouseTapContext,
+    event: core_graphics::sys::CGEventRef,
+) {
+    use core_graphics::event::EventField;
 
-            log::info!(
-                "[mouse] OtherMouseDown received: button={}, trigger={}",
-                button,
-                is_trigger
-            );
-            let _ = context.tx.send(MouseTriggerEvent {
-                button,
-                is_trigger,
-                timestamp_ms,
-            });
+    if !context.running.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let button =
+        unsafe { CGEventGetIntegerValueField(event, EventField::MOUSE_EVENT_BUTTON_NUMBER) };
+    let timestamp_ms = now_millis();
+    let is_trigger = {
+        let mut guard = context
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let is_trigger = button == guard.trigger_button;
+        guard.status = MouseTriggerStatus::EventReceived;
+        guard.accessibility_trusted = true;
+        guard.last_button = Some(button);
+        guard.last_event_at = Some(timestamp_ms);
+        guard.last_error = None;
+        if is_trigger {
+            guard.last_trigger_at = Some(timestamp_ms);
+            guard.last_pipeline_result = Some(format!("Trigger button {} received", button));
+        } else if guard
+            .test_active_until
+            .is_some_and(|until| until > timestamp_ms)
+        {
+            guard.last_pipeline_result = Some(format!(
+                "Received button {}, configured trigger is {}",
+                button, guard.trigger_button
+            ));
         }
+        is_trigger
+    };
+
+    log::info!(
+        "[mouse] OtherMouseDown received: button={}, trigger={}",
+        button,
+        is_trigger
+    );
+    let _ = context.tx.send(MouseTriggerEvent {
+        button,
+        is_trigger,
+        source: TriggerSource::MouseMiddle,
+        timestamp_ms,
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn handle_macos_left_mouse_down(
+    context: &RawMouseTapContext,
+    event: core_graphics::sys::CGEventRef,
+) {
+    if !context.running.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let location = unsafe { CGEventGetLocation(event) };
+    let timestamp_ms = now_millis();
+    {
+        let mut tracker = context
+            .drag_tracker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tracker.start = Some(DragPoint {
+            x: location.x,
+            y: location.y,
+            timestamp_ms,
+        });
+    }
+    let mut guard = context
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.status = MouseTriggerStatus::EventReceived;
+    guard.accessibility_trusted = true;
+    guard.last_button = Some(0);
+    guard.last_event_at = Some(timestamp_ms);
+    guard.last_error = None;
+}
+
+#[cfg(target_os = "macos")]
+fn handle_macos_left_mouse_up(context: &RawMouseTapContext, event: core_graphics::sys::CGEventRef) {
+    if !context.running.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let location = unsafe { CGEventGetLocation(event) };
+    let timestamp_ms = now_millis();
+    let end = DragPoint {
+        x: location.x,
+        y: location.y,
+        timestamp_ms,
+    };
+
+    let (start, last_trigger_at) = {
+        let mut tracker = context
+            .drag_tracker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let start = tracker.start.take();
+        (start, tracker.last_trigger_at)
+    };
+
+    let Some(start) = start else {
+        return;
+    };
+
+    let should_trigger = {
+        let mut guard = context
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.status = MouseTriggerStatus::EventReceived;
+        guard.accessibility_trusted = true;
+        guard.last_button = Some(0);
+        guard.last_event_at = Some(timestamp_ms);
+        guard.last_error = None;
+
+        let should_trigger =
+            is_selection_drag(start, end, last_trigger_at, guard.selection_trigger_enabled);
+        if should_trigger {
+            guard.last_trigger_at = Some(timestamp_ms);
+            guard.last_pipeline_result = Some("Selection drag detected".to_string());
+        }
+        should_trigger
+    };
+
+    if should_trigger {
+        {
+            let mut tracker = context
+                .drag_tracker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            tracker.last_trigger_at = Some(timestamp_ms);
+        }
+        log::info!(
+            "[mouse] Selection drag received: distance={:.1}",
+            drag_distance(start, end)
+        );
+        let _ = context.tx.send(MouseTriggerEvent {
+            button: 0,
+            is_trigger: true,
+            source: TriggerSource::MouseSelection,
+            timestamp_ms,
+        });
     }
 }
 
@@ -401,6 +590,10 @@ extern "C" {
         event: core_graphics::sys::CGEventRef,
         field: core_graphics::event::CGEventField,
     ) -> i64;
+
+    fn CGEventGetLocation(
+        event: core_graphics::sys::CGEventRef,
+    ) -> core_graphics::geometry::CGPoint;
 }
 
 #[cfg(target_os = "macos")]
@@ -457,11 +650,13 @@ fn start_platform_listener(
             }
 
             let restart_requested = Arc::new(AtomicBool::new(false));
+            let drag_tracker = Arc::new(Mutex::new(SelectionDragTracker::default()));
             let tap = RawMacosEventTap::new(
                 running.clone(),
                 tx.clone(),
                 restart_requested.clone(),
                 state.clone(),
+                drag_tracker,
             );
 
             let Ok(tap) = tap else {
@@ -561,27 +756,115 @@ fn start_platform_listener(
         }
 
         let callback_state = state.clone();
+        let drag_tracker = Arc::new(Mutex::new(SelectionDragTracker::default()));
+        let last_mouse_pos = Arc::new(Mutex::new(None::<(f64, f64)>));
+        let callback_drag_tracker = drag_tracker.clone();
+        let callback_mouse_pos = last_mouse_pos.clone();
         let callback = move |event: Event| {
             if !running.load(Ordering::SeqCst) {
                 return;
             }
 
-            if let EventType::ButtonPress(Button::Middle) = event.event_type {
-                let timestamp_ms = now_millis();
-                {
+            match event.event_type {
+                EventType::MouseMove { x, y } => {
+                    let mut pos = callback_mouse_pos
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    *pos = Some((x, y));
+                }
+                EventType::ButtonPress(Button::Left) => {
+                    let timestamp_ms = now_millis();
+                    if let Some((x, y)) = *callback_mouse_pos
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    {
+                        let mut tracker = callback_drag_tracker
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        tracker.start = Some(DragPoint { x, y, timestamp_ms });
+                    }
+
                     let mut guard = callback_state
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     guard.status = MouseTriggerStatus::EventReceived;
-                    guard.last_button = Some(2);
+                    guard.last_button = Some(0);
                     guard.last_event_at = Some(timestamp_ms);
-                    guard.last_trigger_at = Some(timestamp_ms);
                 }
-                let _ = tx.send(MouseTriggerEvent {
-                    button: 2,
-                    is_trigger: true,
-                    timestamp_ms,
-                });
+                EventType::ButtonRelease(Button::Left) => {
+                    let timestamp_ms = now_millis();
+                    let Some((x, y)) = *callback_mouse_pos
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    else {
+                        return;
+                    };
+                    let end = DragPoint { x, y, timestamp_ms };
+                    let (start, last_trigger_at) = {
+                        let mut tracker = callback_drag_tracker
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let start = tracker.start.take();
+                        (start, tracker.last_trigger_at)
+                    };
+                    let Some(start) = start else {
+                        return;
+                    };
+
+                    let should_trigger = {
+                        let mut guard = callback_state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        guard.status = MouseTriggerStatus::EventReceived;
+                        guard.last_button = Some(0);
+                        guard.last_event_at = Some(timestamp_ms);
+
+                        let should_trigger = is_selection_drag(
+                            start,
+                            end,
+                            last_trigger_at,
+                            guard.selection_trigger_enabled,
+                        );
+                        if should_trigger {
+                            guard.last_trigger_at = Some(timestamp_ms);
+                            guard.last_pipeline_result =
+                                Some("Selection drag detected".to_string());
+                        }
+                        should_trigger
+                    };
+
+                    if should_trigger {
+                        let mut tracker = callback_drag_tracker
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        tracker.last_trigger_at = Some(timestamp_ms);
+                        let _ = tx.send(MouseTriggerEvent {
+                            button: 0,
+                            is_trigger: true,
+                            source: TriggerSource::MouseSelection,
+                            timestamp_ms,
+                        });
+                    }
+                }
+                EventType::ButtonPress(Button::Middle) => {
+                    let timestamp_ms = now_millis();
+                    {
+                        let mut guard = callback_state
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        guard.status = MouseTriggerStatus::EventReceived;
+                        guard.last_button = Some(2);
+                        guard.last_event_at = Some(timestamp_ms);
+                        guard.last_trigger_at = Some(timestamp_ms);
+                    }
+                    let _ = tx.send(MouseTriggerEvent {
+                        button: 2,
+                        is_trigger: true,
+                        source: TriggerSource::MouseMiddle,
+                        timestamp_ms,
+                    });
+                }
+                _ => {}
             }
         };
 
@@ -599,8 +882,59 @@ fn start_platform_listener(
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
     use super::*;
+
+    fn point(x: f64, y: f64, timestamp_ms: i64) -> DragPoint {
+        DragPoint { x, y, timestamp_ms }
+    }
+
+    #[test]
+    fn selection_drag_requires_enabled_distance_and_duration() {
+        let start = point(0.0, 0.0, 1_000);
+
+        assert!(!is_selection_drag(
+            start,
+            point(100.0, 0.0, 1_200),
+            None,
+            false
+        ));
+        assert!(!is_selection_drag(
+            start,
+            point(4.0, 0.0, 1_200),
+            None,
+            true
+        ));
+        assert!(!is_selection_drag(
+            start,
+            point(100.0, 0.0, 1_020),
+            None,
+            true
+        ));
+        assert!(is_selection_drag(
+            start,
+            point(100.0, 0.0, 1_200),
+            None,
+            true
+        ));
+    }
+
+    #[test]
+    fn selection_drag_cooldown_blocks_duplicate_triggers() {
+        let start = point(0.0, 0.0, 1_000);
+
+        assert!(!is_selection_drag(
+            start,
+            point(100.0, 0.0, 1_200),
+            Some(800),
+            true
+        ));
+        assert!(is_selection_drag(
+            start,
+            point(100.0, 0.0, 1_600),
+            Some(800),
+            true
+        ));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -619,7 +953,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_other_mouse_down_requires_non_null_event() {
+    fn macos_mouse_events_require_non_null_event() {
         use core_graphics::event::CGEventType;
 
         assert_eq!(
@@ -627,12 +961,16 @@ mod tests {
             MacosTapEventKind::Invalid
         );
         assert_eq!(
-            classify_macos_tap_event(CGEventType::OtherMouseDown, false),
-            MacosTapEventKind::OtherMouseDown
+            classify_macos_tap_event(CGEventType::LeftMouseDown, true),
+            MacosTapEventKind::Invalid
         );
         assert_eq!(
-            classify_macos_tap_event(CGEventType::OtherMouseUp, false),
-            MacosTapEventKind::Ignored
+            classify_macos_tap_event(CGEventType::LeftMouseUp, true),
+            MacosTapEventKind::Invalid
+        );
+        assert_eq!(
+            classify_macos_tap_event(CGEventType::OtherMouseDown, false),
+            MacosTapEventKind::OtherMouseDown
         );
     }
 }
