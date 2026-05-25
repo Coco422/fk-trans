@@ -5,6 +5,8 @@ use tokio::time::{sleep, timeout, Duration};
 use uuid::Uuid;
 
 const COPY_SHORTCUT_TIMEOUT: Duration = Duration::from_millis(1_500);
+const CLIPBOARD_UPDATE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const CLIPBOARD_UPDATE_POLL_ATTEMPTS: usize = 24;
 #[cfg(target_os = "macos")]
 const MACOS_ANSI_C_KEYCODE: u16 = 0x08;
 
@@ -104,8 +106,8 @@ impl ClipboardManager {
 
         // Wait until the target app overwrites the sentinel, then restore the user's clipboard.
         let mut text = sentinel.clone();
-        for _ in 0..12 {
-            sleep(Duration::from_millis(50)).await;
+        for _ in 0..CLIPBOARD_UPDATE_POLL_ATTEMPTS {
+            sleep(CLIPBOARD_UPDATE_POLL_INTERVAL).await;
             text = Self::get_clipboard_text().unwrap_or_default();
             if text != sentinel {
                 break;

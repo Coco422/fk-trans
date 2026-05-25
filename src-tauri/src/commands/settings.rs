@@ -23,7 +23,10 @@ fn translate_error_kind(error: &TranslateError) -> &'static str {
 
 #[tauri::command]
 pub async fn get_config(state: State<'_, AppState>) -> Result<config::AppConfig, String> {
-    let config = state.config.lock().unwrap();
+    let config = state
+        .config
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     Ok(config.clone())
 }
 
@@ -33,13 +36,22 @@ pub async fn update_config(
     state: State<'_, AppState>,
 ) -> Result<config::AppConfig, String> {
     let result = {
-        let mut config = state.config.lock().unwrap();
+        let mut config = state
+            .config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if let Some(enabled) = updates.get("enabled").and_then(|v| v.as_bool()) {
             config.enabled = enabled;
         }
         if let Some(debug_logging) = updates.get("debug_logging").and_then(|v| v.as_bool()) {
             config.debug_logging = debug_logging;
+        }
+        if let Some(selection_trigger_enabled) = updates
+            .get("selection_trigger_enabled")
+            .and_then(|v| v.as_bool())
+        {
+            config.selection_trigger_enabled = selection_trigger_enabled;
         }
         if let Some(lang) = updates.get("source_lang").and_then(|v| v.as_str()) {
             config.source_lang = lang.to_string();
@@ -66,6 +78,12 @@ pub async fn update_config(
         crate::mouse::listener::set_trigger_button(
             &state.mouse_trigger_state,
             result.mouse_trigger_button,
+        );
+    }
+    if updates.get("selection_trigger_enabled").is_some() {
+        crate::mouse::listener::set_selection_trigger_enabled(
+            &state.mouse_trigger_state,
+            result.selection_trigger_enabled,
         );
     }
     if updates.get("debug_logging").is_some() {
@@ -95,7 +113,10 @@ pub async fn update_provider(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let provider_cfg = {
-        let mut config = state.config.lock().unwrap();
+        let mut config = state
+            .config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if let Some(p) = config.providers.iter_mut().find(|p| p.name == name) {
             p.base_url = base_url;
@@ -151,7 +172,10 @@ pub async fn test_provider(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let provider_config = {
-        let config = state.config.lock().unwrap();
+        let config = state
+            .config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         config
             .providers
             .iter()

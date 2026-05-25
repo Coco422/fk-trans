@@ -10,7 +10,11 @@ use tauri::{
 
 pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let state = app.state::<AppState>();
-    let is_enabled = state.config.lock().unwrap().enabled;
+    let is_enabled = state
+        .config
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .enabled;
 
     let enable_item = CheckMenuItemBuilder::with_id("enable", "Enable fk-trans")
         .checked(is_enabled)
@@ -25,13 +29,15 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .item(&quit_item)
         .build()?;
 
-    let _tray = TrayIconBuilder::new()
-        .icon(app.default_window_icon().unwrap().clone())
+    let mut tray_builder = TrayIconBuilder::new()
         .menu(&menu)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "enable" => {
                 let state = app.state::<AppState>();
-                let mut config = state.config.lock().unwrap();
+                let mut config = state
+                    .config
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 config.enabled = !config.enabled;
                 let new_state = config.enabled;
                 if let Err(e) = config::save_config(&config) {
@@ -54,11 +60,13 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             }
             "quit" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    let _ = state.mouse_listener.lock().map(|mut listener| {
-                        if let Some(listener) = listener.take() {
-                            listener.stop();
-                        }
-                    });
+                    let mut listener = state
+                        .mouse_listener
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if let Some(listener) = listener.take() {
+                        listener.stop();
+                    }
                 }
                 app.exit(0);
             }
@@ -76,8 +84,15 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     reveal_window(&window);
                 }
             }
-        })
-        .build(app)?;
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        tray_builder = tray_builder.icon(icon.clone());
+    } else {
+        log::warn!("[tray] Default window icon unavailable; creating tray without icon");
+    }
+
+    let _tray = tray_builder.build(app)?;
 
     Ok(())
 }

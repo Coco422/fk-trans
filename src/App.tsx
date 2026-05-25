@@ -19,6 +19,7 @@ interface ProviderConfig {
 interface AppConfig {
   enabled: boolean;
   debug_logging: boolean;
+  selection_trigger_enabled: boolean;
   source_lang: string;
   target_lang: string;
   active_provider: string;
@@ -60,6 +61,7 @@ interface MouseTriggerState {
   status: string;
   accessibility_trusted: boolean;
   trigger_button: number;
+  selection_trigger_enabled: boolean;
   last_button?: number | null;
   last_event_at?: number | null;
   last_trigger_at?: number | null;
@@ -581,7 +583,7 @@ export default function App() {
                       <div>
                         <div class="text-sm font-medium">Enable fk-trans</div>
                         <div class="text-xs text-gray-500">
-                          Middle-click to translate selected text
+                          Select text or middle-click to translate
                         </div>
                       </div>
                       <button
@@ -595,6 +597,36 @@ export default function App() {
                         <div
                           class={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
                             cfg().enabled
+                              ? "translate-x-[22px]"
+                              : "translate-x-[2px]"
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    {/* Selection trigger toggle */}
+                    <div class="flex items-center justify-between p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                      <div>
+                        <div class="text-sm font-medium">Selection Trigger</div>
+                        <div class="text-xs text-gray-500">
+                          Translate after a deliberate left-button text selection
+                        </div>
+                      </div>
+                      <button
+                        class={`w-11 h-6 rounded-full transition-colors cursor-pointer ${
+                          cfg().selection_trigger_enabled
+                            ? "bg-blue-500"
+                            : "bg-gray-300 dark:bg-gray-700"
+                        }`}
+                        onClick={() =>
+                          saveConfig({
+                            selection_trigger_enabled: !cfg().selection_trigger_enabled,
+                          })
+                        }
+                      >
+                        <div
+                          class={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
+                            cfg().selection_trigger_enabled
                               ? "translate-x-[22px]"
                               : "translate-x-[2px]"
                           }`}
@@ -664,6 +696,12 @@ export default function App() {
                     <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
                       <div class="text-sm font-medium mb-2">Shortcuts</div>
                       <div class="text-xs text-gray-500 space-y-1">
+                        <div>
+                          <kbd class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[11px] font-mono">
+                            Select Text
+                          </kbd>{" "}
+                          {cfg().selection_trigger_enabled ? "auto-translates after drag selection" : "disabled"}
+                        </div>
                         <div>
                           <kbd class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[11px] font-mono">
                             Middle Click
@@ -980,6 +1018,12 @@ export default function App() {
                               <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
                                 <div class="text-gray-400 mb-1">Trigger Button</div>
                                 <div class="font-mono">{cfg().mouse_trigger_button}</div>
+                              </div>
+                              <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
+                                <div class="text-gray-400 mb-1">Selection Trigger</div>
+                                <div class="font-mono">
+                                  {diag().mouse.selection_trigger_enabled ? "enabled" : "disabled"}
+                                </div>
                               </div>
                               <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
                                 <div class="text-gray-400 mb-1">Last Button</div>

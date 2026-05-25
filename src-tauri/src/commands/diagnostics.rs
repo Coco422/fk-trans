@@ -170,6 +170,7 @@ mouse_trigger:
   status: {:?}
   accessibility_trusted: {}
   trigger_button: {}
+  selection_trigger_enabled: {}
   last_button: {:?}
   last_event_at: {:?}
   last_trigger_at: {:?}
@@ -196,6 +197,7 @@ recent_logs:
         snapshot.mouse.status,
         snapshot.mouse.accessibility_trusted,
         snapshot.mouse.trigger_button,
+        snapshot.mouse.selection_trigger_enabled,
         snapshot.mouse.last_button,
         snapshot.mouse.last_event_at,
         snapshot.mouse.last_trigger_at,

@@ -4,6 +4,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { TranslationPayload } from "../types/translation";
 
+const ACTIONS = [
+  { id: "explain", label: "Explain" },
+  { id: "summary", label: "Summary" },
+  { id: "polish", label: "Polish" },
+  { id: "dict", label: "Dict" },
+] as const;
+
 export default function FloatingPopup() {
   const [data, setData] = createSignal<TranslationPayload | null>(null);
   const [loading, setLoading] = createSignal(false);
@@ -223,20 +230,20 @@ export default function FloatingPopup() {
 
             {/* Action buttons */}
             <div class="flex gap-1.5 mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
-              <For each={["explain", "dict", "summary"] as const}>
+              <For each={ACTIONS}>
                 {(action) => (
                   <button
                     class="text-xs px-2.5 py-1 rounded-lg bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors capitalize cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                     disabled={actionLoading() !== null}
-                    onClick={() => handleAction(action)}
+                    onClick={() => handleAction(action.id)}
                   >
-                    {actionLoading() === action ? (
+                    {actionLoading() === action.id ? (
                       <span class="inline-flex items-center gap-1">
                         <span class="w-3 h-3 border border-gray-400 border-t-transparent rounded-full animate-spin inline-block" />
-                        {action}
+                        {action.label}
                       </span>
                     ) : (
-                      action
+                      action.label
                     )}
                   </button>
                 )}

@@ -7,7 +7,7 @@ export interface ProviderDraftForUpdate {
   extra_params: Record<string, unknown>;
 }
 
-export interface UpdateProviderCommandArgs {
+export interface UpdateProviderCommandArgs extends Record<string, unknown> {
   name: string;
   baseUrl: string;
   apiKey: string;

@@ -50,7 +50,10 @@ impl HistoryStore {
     }
 
     pub fn add(&self, entry: HistoryEntry) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         entries.insert(0, entry);
         if entries.len() > self.max_entries {
             entries.truncate(self.max_entries);
@@ -59,11 +62,17 @@ impl HistoryStore {
     }
 
     pub fn get_all(&self) -> Vec<HistoryEntry> {
-        self.entries.lock().unwrap().clone()
+        self.entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn clear(&self) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         entries.clear();
         save_history_to_disk(&entries);
     }

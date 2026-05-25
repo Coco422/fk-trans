@@ -16,7 +16,7 @@ use std::sync::{
 };
 use tauri::{Emitter, Manager, PhysicalPosition};
 use tokio::sync::RwLock;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use translate::provider::TranslateError;
 use translate::TranslationEngine;
 
@@ -26,6 +26,7 @@ const POPUP_SCREEN_MARGIN: f64 = 8.0;
 const LOG_MAX_FILE_SIZE_BYTES: u64 = 512 * 1024;
 const LOG_ROTATION_KEEP_FILES: usize = 4;
 const CLIPBOARD_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+const SELECTION_CAPTURE_SETTLE_DELAY: Duration = Duration::from_millis(120);
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
@@ -50,8 +51,12 @@ fn current_cursor_position(app: &tauri::AppHandle) -> PhysicalPosition<f64> {
         Ok(pos) => pos,
         Err(e) => {
             log::warn!("[pipeline] Failed to read cursor via Tauri: {}", e);
-            let pos = mouse::cursor::get_cursor_position();
-            PhysicalPosition::new(pos.x, pos.y)
+            mouse::cursor::get_cursor_position()
+                .map(|pos| PhysicalPosition::new(pos.x, pos.y))
+                .unwrap_or_else(|| {
+                    log::warn!("[pipeline] Failed to read cursor via CoreGraphics fallback");
+                    PhysicalPosition::new(0.0, 0.0)
+                })
         }
     }
 }
@@ -154,6 +159,7 @@ async fn run_translation_pipeline(
     running: Arc<AtomicBool>,
     source: TriggerSource,
 ) {
+    let is_selection_source = source == TriggerSource::MouseSelection;
     if running
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -183,7 +189,10 @@ async fn run_translation_pipeline(
     // Check if enabled and locally usable before touching the clipboard.
     let readiness = {
         let state = app.state::<AppState>();
-        let config = state.config.lock().unwrap();
+        let config = state
+            .config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !config.enabled {
             log::info!("[pipeline] Disabled, skipping");
             mouse::listener::mark_pipeline_result(
@@ -206,6 +215,17 @@ async fn run_translation_pipeline(
 
     if let Err(reason) = readiness {
         log::warn!("[pipeline] No available provider: {}", reason);
+        if is_selection_source {
+            let state = app.state::<AppState>();
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                "Skipped: selection trigger ignored because provider is not ready",
+                Some(reason),
+            );
+            emit_mouse_trigger_state(&app);
+            return;
+        }
+
         show_popup_error(
             &app,
             cursor_pos,
@@ -221,9 +241,13 @@ async fn run_translation_pipeline(
         return;
     }
 
-    // Show a visible loading state before clipboard capture so trigger failures are observable.
-    show_popup_at_cursor(&app, cursor_pos);
-    let _ = app.emit("translation-started", ());
+    if is_selection_source {
+        sleep(SELECTION_CAPTURE_SETTLE_DELAY).await;
+    } else {
+        // Show a visible loading state before explicit triggers so failures are observable.
+        show_popup_at_cursor(&app, cursor_pos);
+        let _ = app.emit("translation-started", ());
+    }
 
     log::info!("[pipeline] Capturing selected text...");
     let text = match timeout(CLIPBOARD_CAPTURE_TIMEOUT, cm.capture_selected_text()).await {
@@ -237,11 +261,21 @@ async fn run_translation_pipeline(
         }
         Ok(None) => {
             log::warn!("[pipeline] No text captured, skipping");
+            let state = app.state::<AppState>();
+            if is_selection_source {
+                mouse::listener::mark_pipeline_result(
+                    &state.mouse_trigger_state,
+                    "Ignored: selection drag produced no captured text",
+                    None,
+                );
+                emit_mouse_trigger_state(&app);
+                return;
+            }
+
             let _ = app.emit(
                 "translation-error",
                 "No selected text captured. Select text in another app and try again.".to_string(),
             );
-            let state = app.state::<AppState>();
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
                 "Failed: no selected text captured",
@@ -255,12 +289,22 @@ async fn run_translation_pipeline(
                 "[pipeline] Clipboard capture timed out after {} ms",
                 CLIPBOARD_CAPTURE_TIMEOUT.as_millis()
             );
+            let state = app.state::<AppState>();
+            if is_selection_source {
+                mouse::listener::mark_pipeline_result(
+                    &state.mouse_trigger_state,
+                    "Ignored: selection clipboard capture timed out",
+                    Some("Clipboard capture timeout".to_string()),
+                );
+                emit_mouse_trigger_state(&app);
+                return;
+            }
+
             let _ = app.emit(
                 "translation-error",
                 "Clipboard capture timed out. Try again after selecting text in the target app."
                     .to_string(),
             );
-            let state = app.state::<AppState>();
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
                 "Failed: clipboard capture timed out",
@@ -271,10 +315,18 @@ async fn run_translation_pipeline(
         }
     };
 
+    if is_selection_source {
+        show_popup_at_cursor(&app, cursor_pos);
+        let _ = app.emit("translation-started", ());
+    }
+
     // Get config values
     let state = app.state::<AppState>();
     let (source_lang, target_lang) = {
-        let config = state.config.lock().unwrap();
+        let config = state
+            .config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         (config.source_lang.clone(), config.target_lang.clone())
     };
 
@@ -383,8 +435,10 @@ pub fn run() {
             );
             let active_provider = config.active_provider.clone();
             let provider_configs = config.providers.clone();
-            let mouse_trigger_state =
-                mouse::listener::new_shared_state(config.mouse_trigger_button);
+            let mouse_trigger_state = mouse::listener::new_shared_state_with_options(
+                config.mouse_trigger_button,
+                config.selection_trigger_enabled,
+            );
 
             app.manage(AppState {
                 config: Mutex::new(config),
@@ -398,7 +452,9 @@ pub fn run() {
             });
 
             // Create system tray
-            tray::menu::create_tray(app.handle()).expect("Failed to create tray");
+            if let Err(e) = tray::menu::create_tray(app.handle()) {
+                log::error!("[tray] Failed to create tray: {}", e);
+            }
 
             // Configure popup window as non-activating on macOS
             #[cfg(target_os = "macos")]
@@ -422,7 +478,7 @@ pub fn run() {
             app.state::<AppState>()
                 .mouse_listener
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .replace(listener);
 
             let app_handle_clone = app_handle.clone();
@@ -434,9 +490,10 @@ pub fn run() {
                 match rx.recv() {
                     Ok(event) => {
                         log::info!(
-                            "[mouse] Event delivered to pipeline receiver: button={} trigger={} ts={}",
+                            "[mouse] Event delivered to pipeline receiver: button={} trigger={} source={:?} ts={}",
                             event.button,
                             event.is_trigger,
+                            event.source,
                             event.timestamp_ms
                         );
                         let app = app_handle_clone.clone();
@@ -450,7 +507,7 @@ pub fn run() {
                             app,
                             cm,
                             running,
-                            TriggerSource::MouseMiddle,
+                            event.source,
                         ));
                     }
                     Err(e) => {
