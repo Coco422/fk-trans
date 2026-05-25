@@ -1,6 +1,13 @@
 # fk-trans
 
-Middle-click driven desktop translation tool built with Tauri, Solid, and TypeScript.
+Local desktop translation tool built with Tauri, Solid, and TypeScript.
+
+## Features
+
+- Middle-click and deliberate text-selection translation.
+- `Cmd+Shift+T` fallback shortcut for selected text.
+- macOS OCR screenshot-region translation with `Cmd+Shift+O`.
+- Provider configuration, history, diagnostics, and popup translation actions.
 
 ## Development
 
@@ -8,6 +15,8 @@ Middle-click driven desktop translation tool built with Tauri, Solid, and TypeSc
 npm install
 npm run tauri dev
 ```
+
+See [docs/development.md](docs/development.md) for macOS dev permissions, OCR Screen Recording setup, and verification commands.
 
 ## Release
 
