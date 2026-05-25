@@ -69,6 +69,10 @@ pub async fn update_config(
         if let Some(button) = updates.get("mouse_trigger_button").and_then(|v| v.as_i64()) {
             config.mouse_trigger_button = button;
         }
+        if let Some(action_prompts) = updates.get("action_prompts") {
+            config.action_prompts = serde_json::from_value(action_prompts.clone())
+                .map_err(|e| format!("Invalid action prompts: {}", e))?;
+        }
 
         config::save_config(&config)?;
         config.clone()

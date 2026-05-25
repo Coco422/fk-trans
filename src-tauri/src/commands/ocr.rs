@@ -1,6 +1,22 @@
 use crate::ocr::{self, OcrSelectionPayload, OcrSelectionRect};
 use crate::AppState;
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrReadyPayload {
+    text: String,
+    image_data_url: String,
+    regions: Vec<ocr::OcrTextRegion>,
+    cursor_x: f64,
+    cursor_y: f64,
+    capture_source: &'static str,
+    ocr_backend: &'static str,
+    ocr_elapsed_ms: u64,
+    source_lang: String,
+    target_lang: String,
+}
 
 #[tauri::command]
 pub fn get_ocr_selection_payload(
@@ -33,12 +49,17 @@ pub async fn complete_ocr_selection(
         return Ok(());
     };
 
-    crate::show_popup_at_cursor(&app, crop.popup_anchor);
-    let _ = app.emit("translation-started", ());
+    crate::show_ocr_popup_at_cursor(&app, crop.popup_anchor);
+    let _ = app.emit("ocr-started", ());
 
     let started = std::time::Instant::now();
-    let ocr_text = match tauri::async_runtime::spawn_blocking(move || {
-        ocr::recognize_text_from_png(&crop.png_bytes)
+    let ocr::OcrCrop {
+        png_bytes,
+        image_data_url,
+        popup_anchor,
+    } = crop;
+    let recognition = match tauri::async_runtime::spawn_blocking(move || {
+        ocr::recognize_text_from_png(&png_bytes)
     })
     .await
     {
@@ -58,13 +79,13 @@ pub async fn complete_ocr_selection(
     };
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
-    let text = match ocr_text {
-        Ok(text) if !text.trim().is_empty() => {
+    let recognition = match recognition {
+        Ok(recognition) if !recognition.text.trim().is_empty() => {
             state.ocr_runtime.mark_result(
-                format!("OCR recognized {} chars", text.chars().count()),
+                format!("OCR recognized {} chars", recognition.text.chars().count()),
                 Some(elapsed_ms),
             );
-            text
+            recognition
         }
         Ok(_) => {
             let message = "OCR found no readable text".to_string();
@@ -91,16 +112,32 @@ pub async fn complete_ocr_selection(
         }
     };
 
-    crate::translate_and_emit(
-        app,
-        text,
-        crop.popup_anchor,
-        crate::CaptureMetadata::Ocr {
-            backend: "apple_vision",
-            elapsed_ms,
-        },
-    )
-    .await;
+    let (source_lang, target_lang) = {
+        let config = state
+            .config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (config.source_lang.clone(), config.target_lang.clone())
+    };
+    let payload = OcrReadyPayload {
+        text: recognition.text,
+        image_data_url,
+        regions: recognition.regions,
+        cursor_x: popup_anchor.x,
+        cursor_y: popup_anchor.y,
+        capture_source: "ocr",
+        ocr_backend: "apple_vision",
+        ocr_elapsed_ms: elapsed_ms,
+        source_lang,
+        target_lang,
+    };
+    let _ = app.emit("ocr-ready", payload);
+    crate::mouse::listener::mark_pipeline_result(
+        &state.mouse_trigger_state,
+        "Success: OCR recognized text",
+        None,
+    );
+    crate::emit_mouse_trigger_state(&app);
 
     Ok(())
 }

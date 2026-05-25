@@ -32,6 +32,23 @@ pub struct OcrSelectionPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrTextRegion {
+    pub text: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrRecognition {
+    pub text: String,
+    pub regions: Vec<OcrTextRegion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OcrDiagnostic {
     pub enabled: bool,
     pub backend: String,
@@ -45,6 +62,7 @@ pub struct OcrDiagnostic {
 
 pub struct OcrCrop {
     pub png_bytes: Vec<u8>,
+    pub image_data_url: String,
     pub popup_anchor: PhysicalPosition<f64>,
 }
 
@@ -204,6 +222,7 @@ impl OcrRuntime {
             image::imageops::crop_imm(&session.image, rect.x, rect.y, rect.width, rect.height)
                 .to_image();
         let png_bytes = encode_png(&cropped)?;
+        let image_data_url = png_bytes_data_url(&png_bytes);
         let anchor_x = selection
             .x
             .max(selection.x + selection.width)
@@ -224,6 +243,7 @@ impl OcrRuntime {
 
         Ok(Some(OcrCrop {
             png_bytes,
+            image_data_url,
             popup_anchor,
         }))
     }
@@ -322,11 +342,15 @@ pub fn map_selection_to_image(
 }
 
 fn png_data_url(image: &RgbaImage) -> Result<String, String> {
+    let bytes = encode_png(image)?;
+    Ok(png_bytes_data_url(&bytes))
+}
+
+fn png_bytes_data_url(bytes: &[u8]) -> String {
     use base64::Engine;
 
-    let bytes = encode_png(image)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    Ok(format!("data:image/png;base64,{}", encoded))
+    format!("data:image/png;base64,{}", encoded)
 }
 
 fn encode_png(image: &RgbaImage) -> Result<Vec<u8>, String> {
@@ -387,18 +411,41 @@ fn capture_current_monitor(_cursor: PhysicalPosition<f64>) -> Result<CapturedMon
     Err("OCR screen capture is only implemented on macOS".to_string())
 }
 
+pub(crate) fn region_from_bottom_left_bbox(
+    text: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> OcrTextRegion {
+    let left = x.clamp(0.0, 1.0);
+    let right = (x + width).clamp(0.0, 1.0);
+    let top = (1.0 - y - height).clamp(0.0, 1.0);
+    let bottom = (1.0 - y).clamp(0.0, 1.0);
+
+    OcrTextRegion {
+        text,
+        x: left,
+        y: top,
+        width: (right - left).max(0.0),
+        height: (bottom - top).max(0.0),
+    }
+}
+
 #[cfg(target_os = "macos")]
-pub fn recognize_text_from_png(png: &[u8]) -> Result<String, String> {
+pub fn recognize_text_from_png(png: &[u8]) -> Result<OcrRecognition, String> {
     macos_vision::recognize_text_from_png(png)
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn recognize_text_from_png(_png: &[u8]) -> Result<String, String> {
+pub fn recognize_text_from_png(_png: &[u8]) -> Result<OcrRecognition, String> {
     Err("Apple Vision OCR is only available on macOS".to_string())
 }
 
 #[cfg(target_os = "macos")]
 mod macos_vision {
+    use super::{region_from_bottom_left_bbox, OcrRecognition, OcrTextRegion};
+    use core_graphics::geometry::CGRect;
     use objc::runtime::{Object, BOOL, NO, YES};
     use objc::{class, msg_send, sel, sel_impl};
     use std::ffi::CStr;
@@ -410,7 +457,7 @@ mod macos_vision {
     #[link(name = "Foundation", kind = "framework")]
     extern "C" {}
 
-    pub fn recognize_text_from_png(png: &[u8]) -> Result<String, String> {
+    pub fn recognize_text_from_png(png: &[u8]) -> Result<OcrRecognition, String> {
         unsafe {
             let pool: *mut Object = msg_send![class!(NSAutoreleasePool), new];
             let result = recognize_text_from_png_inner(png);
@@ -419,7 +466,7 @@ mod macos_vision {
         }
     }
 
-    unsafe fn recognize_text_from_png_inner(png: &[u8]) -> Result<String, String> {
+    unsafe fn recognize_text_from_png_inner(png: &[u8]) -> Result<OcrRecognition, String> {
         let data: *mut Object = msg_send![
             class!(NSData),
             dataWithBytes: png.as_ptr()
@@ -456,7 +503,7 @@ mod macos_vision {
         }
 
         let observations: *mut Object = msg_send![request, results];
-        let mut lines = Vec::new();
+        let mut regions: Vec<OcrTextRegion> = Vec::new();
         if !observations.is_null() {
             let count: usize = msg_send![observations, count];
             for index in 0..count {
@@ -474,7 +521,14 @@ mod macos_vision {
                 if let Some(text) = ns_string_to_string(string) {
                     let trimmed = text.trim();
                     if !trimmed.is_empty() {
-                        lines.push(trimmed.to_string());
+                        let bounding_box: CGRect = msg_send![observation, boundingBox];
+                        regions.push(region_from_bottom_left_bbox(
+                            trimmed.to_string(),
+                            bounding_box.origin.x,
+                            bounding_box.origin.y,
+                            bounding_box.size.width,
+                            bounding_box.size.height,
+                        ));
                     }
                 }
             }
@@ -483,11 +537,17 @@ mod macos_vision {
         let _: () = msg_send![handler, release];
         let _: () = msg_send![request, release];
 
-        let text = lines.join("\n").trim().to_string();
+        let text = regions
+            .iter()
+            .map(|region| region.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
         if text.is_empty() {
             Err("OCR found no readable text".to_string())
         } else {
-            Ok(text)
+            Ok(OcrRecognition { text, regions })
         }
     }
 
@@ -558,5 +618,62 @@ mod tests {
                 height: 90
             }
         );
+    }
+
+    #[test]
+    fn bottom_left_vision_bbox_maps_to_top_left_region() {
+        let region = region_from_bottom_left_bbox("hello".to_string(), 0.1, 0.2, 0.3, 0.4);
+
+        assert_eq!(region.text, "hello");
+        assert!((region.x - 0.1).abs() < f64::EPSILON);
+        assert!((region.y - 0.4).abs() < f64::EPSILON);
+        assert!((region.width - 0.3).abs() < f64::EPSILON);
+        assert!((region.height - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn crop_selection_returns_cropped_image_data_url() {
+        let runtime = OcrRuntime::new();
+        let session_id = "test-session".to_string();
+        let payload = OcrSelectionPayload {
+            session_id: session_id.clone(),
+            image_data_url: String::new(),
+            monitor_x: 0,
+            monitor_y: 0,
+            monitor_width: 20,
+            monitor_height: 20,
+            image_width: 20,
+            image_height: 20,
+        };
+
+        {
+            let mut state = runtime
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.sessions.insert(
+                session_id.clone(),
+                OcrSession {
+                    payload,
+                    image: RgbaImage::new(20, 20),
+                },
+            );
+        }
+
+        let crop = runtime
+            .crop_selection(
+                &session_id,
+                OcrSelectionRect {
+                    x: 2.0,
+                    y: 3.0,
+                    width: 10.0,
+                    height: 11.0,
+                },
+            )
+            .unwrap()
+            .unwrap();
+
+        assert!(crop.image_data_url.starts_with("data:image/png;base64,"));
+        assert!(!crop.png_bytes.is_empty());
     }
 }

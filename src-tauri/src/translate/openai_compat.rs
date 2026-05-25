@@ -61,7 +61,10 @@ impl OpenAICompatProvider {
             .replace("{text}", text)
     }
 
-    fn merge_extra_params(body: &mut serde_json::Value, extra_params: &serde_json::Value) {
+    pub(crate) fn merge_extra_params(
+        body: &mut serde_json::Value,
+        extra_params: &serde_json::Value,
+    ) {
         let Some(body_obj) = body.as_object_mut() else {
             return;
         };

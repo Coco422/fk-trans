@@ -15,7 +15,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
+use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize};
 use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout, Duration};
 use translate::provider::TranslateError;
@@ -24,6 +24,10 @@ use translate::TranslationEngine;
 const POPUP_CURSOR_OFFSET_X: f64 = 14.0;
 const POPUP_CURSOR_OFFSET_Y: f64 = 16.0;
 const POPUP_SCREEN_MARGIN: f64 = 8.0;
+const POPUP_TRANSLATION_WIDTH: f64 = 460.0;
+const POPUP_TRANSLATION_HEIGHT: f64 = 520.0;
+const POPUP_OCR_WIDTH: f64 = 560.0;
+const POPUP_OCR_HEIGHT: f64 = 680.0;
 const LOG_MAX_FILE_SIZE_BYTES: u64 = 512 * 1024;
 const LOG_ROTATION_KEEP_FILES: usize = 4;
 const CLIPBOARD_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -61,6 +65,18 @@ pub enum CaptureMetadata {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PopupLogicalSize {
+    width: f64,
+    height: f64,
+}
+
+impl PopupLogicalSize {
+    const fn new(width: f64, height: f64) -> Self {
+        Self { width, height }
+    }
+}
+
 fn current_cursor_position(app: &tauri::AppHandle) -> PhysicalPosition<f64> {
     match app.cursor_position() {
         Ok(pos) => pos,
@@ -76,51 +92,128 @@ fn current_cursor_position(app: &tauri::AppHandle) -> PhysicalPosition<f64> {
     }
 }
 
-fn popup_position_for_cursor(
-    window: &tauri::WebviewWindow,
+fn clamp_popup_logical_size(
+    target: PopupLogicalSize,
+    work_area: PhysicalSize<u32>,
+    scale_factor: f64,
+) -> PopupLogicalSize {
+    let scale_factor = scale_factor.max(1.0);
+    let available_width =
+        ((work_area.width as f64) - (POPUP_SCREEN_MARGIN * 2.0)).max(1.0) / scale_factor;
+    let available_height =
+        ((work_area.height as f64) - (POPUP_SCREEN_MARGIN * 2.0)).max(1.0) / scale_factor;
+
+    PopupLogicalSize::new(
+        target.width.min(available_width).max(1.0),
+        target.height.min(available_height).max(1.0),
+    )
+}
+
+fn popup_logical_to_physical_size(
+    logical: PopupLogicalSize,
+    scale_factor: f64,
+) -> PhysicalSize<u32> {
+    let scale_factor = scale_factor.max(1.0);
+    PhysicalSize::new(
+        (logical.width * scale_factor).ceil().max(1.0) as u32,
+        (logical.height * scale_factor).ceil().max(1.0) as u32,
+    )
+}
+
+fn popup_position_for_cursor_with_size(
     cursor: PhysicalPosition<f64>,
+    size: PhysicalSize<u32>,
+    work_area_position: PhysicalPosition<i32>,
+    work_area_size: PhysicalSize<u32>,
 ) -> PhysicalPosition<i32> {
     let mut x = cursor.x + POPUP_CURSOR_OFFSET_X;
     let mut y = cursor.y + POPUP_CURSOR_OFFSET_Y;
 
-    if let (Ok(size), Ok(Some(monitor))) = (
-        window.outer_size(),
-        window.monitor_from_point(cursor.x, cursor.y),
-    ) {
-        let work_area = monitor.work_area();
-        let left = work_area.position.x as f64 + POPUP_SCREEN_MARGIN;
-        let top = work_area.position.y as f64 + POPUP_SCREEN_MARGIN;
-        let right = work_area.position.x as f64 + work_area.size.width as f64 - POPUP_SCREEN_MARGIN;
-        let bottom =
-            work_area.position.y as f64 + work_area.size.height as f64 - POPUP_SCREEN_MARGIN;
-        let width = size.width as f64;
-        let height = size.height as f64;
+    let left = work_area_position.x as f64 + POPUP_SCREEN_MARGIN;
+    let top = work_area_position.y as f64 + POPUP_SCREEN_MARGIN;
+    let right = work_area_position.x as f64 + work_area_size.width as f64 - POPUP_SCREEN_MARGIN;
+    let bottom = work_area_position.y as f64 + work_area_size.height as f64 - POPUP_SCREEN_MARGIN;
+    let width = size.width as f64;
+    let height = size.height as f64;
 
-        if x + width > right {
-            x = cursor.x - width - POPUP_CURSOR_OFFSET_X;
-        }
-        if y + height > bottom {
-            y = cursor.y - height - POPUP_CURSOR_OFFSET_Y;
-        }
-
-        x = x.max(left).min((right - width).max(left));
-        y = y.max(top).min((bottom - height).max(top));
+    if x + width > right {
+        x = cursor.x - width - POPUP_CURSOR_OFFSET_X;
     }
+    if y + height > bottom {
+        y = cursor.y - height - POPUP_CURSOR_OFFSET_Y;
+    }
+
+    x = x.max(left).min((right - width).max(left));
+    y = y.max(top).min((bottom - height).max(top));
 
     PhysicalPosition::new(x.round() as i32, y.round() as i32)
 }
 
-pub(crate) fn show_popup_at_cursor(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
+fn show_popup_at_cursor_with_size(
+    app: &tauri::AppHandle,
+    cursor: PhysicalPosition<f64>,
+    target_size: PopupLogicalSize,
+) {
     if let Some(window) = app.get_webview_window("popup") {
-        let popup_pos = popup_position_for_cursor(&window, cursor);
+        let (logical_size, popup_pos) = match window
+            .monitor_from_point(cursor.x, cursor.y)
+            .ok()
+            .flatten()
+        {
+            Some(monitor) => {
+                let work_area = monitor.work_area();
+                let logical_size =
+                    clamp_popup_logical_size(target_size, work_area.size, monitor.scale_factor());
+                let physical_size =
+                    popup_logical_to_physical_size(logical_size, monitor.scale_factor());
+                let popup_pos = popup_position_for_cursor_with_size(
+                    cursor,
+                    physical_size,
+                    work_area.position,
+                    work_area.size,
+                );
+                (logical_size, popup_pos)
+            }
+            None => {
+                let logical_size = target_size;
+                let popup_pos = PhysicalPosition::new(
+                    (cursor.x + POPUP_CURSOR_OFFSET_X).round() as i32,
+                    (cursor.y + POPUP_CURSOR_OFFSET_Y).round() as i32,
+                );
+                (logical_size, popup_pos)
+            }
+        };
+
+        let _ = window.set_size(tauri::Size::Logical(LogicalSize::new(
+            logical_size.width,
+            logical_size.height,
+        )));
         log::info!(
-            "[pipeline] Showing popup at ({}, {})",
+            "[pipeline] Showing popup at ({}, {}), logical_size=({:.0}, {:.0})",
             popup_pos.x,
-            popup_pos.y
+            popup_pos.y,
+            logical_size.width,
+            logical_size.height
         );
         let _ = window.set_position(tauri::Position::Physical(popup_pos));
         let _ = window.show();
     }
+}
+
+pub(crate) fn show_popup_at_cursor(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
+    show_popup_at_cursor_with_size(
+        app,
+        cursor,
+        PopupLogicalSize::new(POPUP_TRANSLATION_WIDTH, POPUP_TRANSLATION_HEIGHT),
+    );
+}
+
+pub(crate) fn show_ocr_popup_at_cursor(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
+    show_popup_at_cursor_with_size(
+        app,
+        cursor,
+        PopupLogicalSize::new(POPUP_OCR_WIDTH, POPUP_OCR_HEIGHT),
+    );
 }
 
 fn show_popup_error(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, message: String) {
@@ -491,7 +584,7 @@ fn validate_ocr_start_with_platform(
     if !screen_recording_ready {
         return Err(MACOS_SCREEN_RECORDING_PERMISSION_MESSAGE.to_string());
     }
-    config::validate_active_provider(config)
+    Ok(())
 }
 
 async fn start_ocr_selection_pipeline(app: tauri::AppHandle, running: Arc<AtomicBool>) {
@@ -825,6 +918,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::translation::translate_text,
             commands::translation::ai_action,
+            commands::translation::ai_action_stream,
             commands::translation::get_history,
             commands::translation::clear_history,
             commands::settings::get_config,
@@ -864,6 +958,25 @@ mod tests {
     }
 
     #[test]
+    fn popup_logical_size_clamps_to_monitor_work_area() {
+        let target = PopupLogicalSize::new(POPUP_OCR_WIDTH, POPUP_OCR_HEIGHT);
+        let small_retina_work_area = PhysicalSize::new(1000, 800);
+
+        let clamped = clamp_popup_logical_size(target, small_retina_work_area, 2.0);
+        let max_width = (small_retina_work_area.width as f64 - POPUP_SCREEN_MARGIN * 2.0) / 2.0;
+        let max_height = (small_retina_work_area.height as f64 - POPUP_SCREEN_MARGIN * 2.0) / 2.0;
+
+        assert!(clamped.width <= max_width);
+        assert!(clamped.height <= max_height);
+
+        let large_retina_work_area = PhysicalSize::new(2400, 1800);
+        assert_eq!(
+            clamp_popup_logical_size(target, large_retina_work_area, 2.0),
+            target
+        );
+    }
+
+    #[test]
     fn ocr_disabled_rejects_start_before_provider_validation() {
         let config = AppConfig {
             ocr_enabled: false,
@@ -895,6 +1008,19 @@ mod tests {
         assert_eq!(
             validate_ocr_start_with_platform(&config, true, false),
             Err(MACOS_SCREEN_RECORDING_PERMISSION_MESSAGE.to_string())
+        );
+    }
+
+    #[test]
+    fn ocr_start_does_not_require_translation_provider() {
+        let config = AppConfig {
+            active_provider: "missing".to_string(),
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            validate_ocr_start_with_platform(&config, true, true),
+            Ok(())
         );
     }
 

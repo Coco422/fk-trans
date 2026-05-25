@@ -24,6 +24,49 @@ pub fn default_user_prompt() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionPromptConfig {
+    #[serde(default = "default_explain_prompt")]
+    pub explain: String,
+    #[serde(default = "default_summary_prompt")]
+    pub summary: String,
+    #[serde(default = "default_polish_prompt")]
+    pub polish: String,
+    #[serde(default = "default_dict_prompt")]
+    pub dict: String,
+}
+
+impl Default for ActionPromptConfig {
+    fn default() -> Self {
+        Self {
+            explain: default_explain_prompt(),
+            summary: default_summary_prompt(),
+            polish: default_polish_prompt(),
+            dict: default_dict_prompt(),
+        }
+    }
+}
+
+pub fn default_ai_action_system_prompt() -> String {
+    "You are a precise language assistant. Follow the user's requested action exactly. Answer in {to} unless the action explicitly asks for another language.".to_string()
+}
+
+pub fn default_explain_prompt() -> String {
+    "Explain the meaning, context, nuance, and usage of this text in {to}. Keep the answer useful and concrete.\n\nText:\n{text}".to_string()
+}
+
+pub fn default_summary_prompt() -> String {
+    "Summarize this text concisely in {to}. Preserve the key points and omit filler.\n\nText:\n{text}".to_string()
+}
+
+pub fn default_polish_prompt() -> String {
+    "Rewrite this text to be clearer, smoother, and more natural while preserving the original meaning. Keep the appropriate language and tone; if the source is not {to}, provide the polished version in {to}.\n\nText:\n{text}".to_string()
+}
+
+pub fn default_dict_prompt() -> String {
+    "Create a dictionary-style entry for this word or phrase in {to}. Include pronunciation if inferable, part of speech, concise definitions, usage notes, and 2 short examples.\n\nText:\n{text}".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub enabled: bool,
     #[serde(default)]
@@ -37,6 +80,8 @@ pub struct AppConfig {
     pub active_provider: String,
     #[serde(default = "default_mouse_trigger_button")]
     pub mouse_trigger_button: i64,
+    #[serde(default)]
+    pub action_prompts: ActionPromptConfig,
     pub providers: Vec<ProviderConfig>,
 }
 
@@ -63,6 +108,7 @@ impl Default for AppConfig {
             target_lang: "zh".to_string(),
             active_provider: "openai".to_string(),
             mouse_trigger_button: default_mouse_trigger_button(),
+            action_prompts: ActionPromptConfig::default(),
             providers: vec![
                 ProviderConfig {
                     name: "deeplx".into(),
@@ -258,6 +304,10 @@ mod tests {
             ocr_enabled: false,
             selection_trigger_enabled: false,
             mouse_trigger_button: 4,
+            action_prompts: ActionPromptConfig {
+                summary: "Summarize {text} in {to}".to_string(),
+                ..ActionPromptConfig::default()
+            },
             ..AppConfig::default()
         };
 
@@ -268,6 +318,24 @@ mod tests {
         assert!(loaded.debug_logging);
         assert!(!loaded.ocr_enabled);
         assert!(!loaded.selection_trigger_enabled);
+        assert_eq!(loaded.action_prompts.summary, "Summarize {text} in {to}");
+        assert!(loaded.action_prompts.explain.contains("{text}"));
+    }
+
+    #[test]
+    fn legacy_config_without_action_prompts_uses_defaults() {
+        let json = r#"{
+            "enabled": true,
+            "source_lang": "auto",
+            "target_lang": "zh",
+            "active_provider": "openai",
+            "providers": []
+        }"#;
+
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+
+        assert!(config.action_prompts.explain.contains("{text}"));
+        assert!(config.action_prompts.dict.contains("dictionary-style"));
     }
 
     #[test]

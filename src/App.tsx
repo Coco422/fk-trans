@@ -16,6 +16,13 @@ interface ProviderConfig {
   extra_params: Record<string, unknown>;
 }
 
+interface ActionPromptConfig {
+  explain: string;
+  summary: string;
+  polish: string;
+  dict: string;
+}
+
 interface AppConfig {
   enabled: boolean;
   debug_logging: boolean;
@@ -25,6 +32,7 @@ interface AppConfig {
   target_lang: string;
   active_provider: string;
   mouse_trigger_button: number;
+  action_prompts: ActionPromptConfig;
   providers: ProviderConfig[];
 }
 
@@ -162,6 +170,9 @@ export default function App() {
   const [extraParamDrafts, setExtraParamDrafts] = createSignal<
     Record<string, string>
   >({});
+  const [actionPromptDraft, setActionPromptDraft] =
+    createSignal<ActionPromptConfig | null>(null);
+  const [actionPromptMessage, setActionPromptMessage] = createSignal("");
   const [updateStatus, setUpdateStatus] = createSignal<UpdateStatus>({
     status: "idle",
     message: "",
@@ -527,6 +538,45 @@ export default function App() {
     }
   }
 
+  function actionPromptsFor(cfg: AppConfig) {
+    return actionPromptDraft() ?? cfg.action_prompts;
+  }
+
+  function actionPromptChanged(cfg: AppConfig) {
+    const draft = actionPromptDraft();
+    return draft
+      ? JSON.stringify(draft) !== JSON.stringify(cfg.action_prompts)
+      : false;
+  }
+
+  function updateActionPrompt(
+    cfg: AppConfig,
+    field: keyof ActionPromptConfig,
+    value: string
+  ) {
+    setActionPromptDraft({
+      ...actionPromptsFor(cfg),
+      [field]: value,
+    });
+    setActionPromptMessage("Unsaved changes");
+  }
+
+  async function saveActionPrompts(cfg: AppConfig) {
+    const draft = actionPromptsFor(cfg);
+    try {
+      await saveConfig({ action_prompts: draft });
+      setActionPromptDraft(null);
+      setActionPromptMessage("Saved");
+    } catch (e) {
+      setActionPromptMessage(`Save failed: ${String(e)}`);
+    }
+  }
+
+  function resetActionPrompts() {
+    setActionPromptDraft(null);
+    setActionPromptMessage("");
+  }
+
   function formatTime(ts: number) {
     return new Date(ts * 1000).toLocaleString();
   }
@@ -857,6 +907,125 @@ export default function App() {
                 {/* Providers tab */}
                 <Show when={activeTab() === "providers"}>
                   <div class="space-y-4">
+                    <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                      <div class="flex items-center justify-between gap-4 mb-3">
+                        <div>
+                          <div class="text-sm font-medium">AI Actions</div>
+                          <div
+                            class={`mt-1 text-xs ${
+                              LLM_PROVIDERS.has(cfg().active_provider)
+                                ? "text-green-500"
+                                : "text-amber-500"
+                            }`}
+                          >
+                            {LLM_PROVIDERS.has(cfg().active_provider)
+                              ? "Active provider supports Explain, Summary, Polish, Dictionary"
+                              : "Choose an LLM provider to use action buttons"}
+                          </div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                          <Show when={actionPromptMessage()}>
+                            <span
+                              class={`text-xs ${
+                                actionPromptMessage().startsWith("Save failed")
+                                  ? "text-red-500"
+                                  : actionPromptMessage() === "Saved"
+                                  ? "text-green-500"
+                                  : "text-amber-500"
+                              }`}
+                            >
+                              {actionPromptMessage()}
+                            </span>
+                          </Show>
+                          <button
+                            class="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                            disabled={!actionPromptChanged(cfg())}
+                            onClick={resetActionPrompts}
+                          >
+                            Reset
+                          </button>
+                          <button
+                            class="text-xs px-2 py-1 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                            disabled={!actionPromptChanged(cfg())}
+                            onClick={() => saveActionPrompts(cfg())}
+                          >
+                            Save
+                          </button>
+                        </div>
+                      </div>
+
+                      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label class="block text-xs text-gray-500 mb-1">
+                            Explain Prompt
+                          </label>
+                          <textarea
+                            class="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400 resize-y min-h-[96px] font-mono"
+                            value={actionPromptsFor(cfg()).explain}
+                            onInput={(e) =>
+                              updateActionPrompt(
+                                cfg(),
+                                "explain",
+                                e.currentTarget.value
+                              )
+                            }
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-xs text-gray-500 mb-1">
+                            Summary Prompt
+                          </label>
+                          <textarea
+                            class="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400 resize-y min-h-[96px] font-mono"
+                            value={actionPromptsFor(cfg()).summary}
+                            onInput={(e) =>
+                              updateActionPrompt(
+                                cfg(),
+                                "summary",
+                                e.currentTarget.value
+                              )
+                            }
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-xs text-gray-500 mb-1">
+                            Polish Prompt
+                          </label>
+                          <textarea
+                            class="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400 resize-y min-h-[96px] font-mono"
+                            value={actionPromptsFor(cfg()).polish}
+                            onInput={(e) =>
+                              updateActionPrompt(
+                                cfg(),
+                                "polish",
+                                e.currentTarget.value
+                              )
+                            }
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-xs text-gray-500 mb-1">
+                            Dictionary Prompt
+                          </label>
+                          <textarea
+                            class="w-full px-3 py-2 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400 resize-y min-h-[96px] font-mono"
+                            value={actionPromptsFor(cfg()).dict}
+                            onInput={(e) =>
+                              updateActionPrompt(
+                                cfg(),
+                                "dict",
+                                e.currentTarget.value
+                              )
+                            }
+                          />
+                        </div>
+                      </div>
+
+                      <div class="mt-2 text-[11px] text-gray-400 font-mono">
+                        {"{text}"} {"{from}"} {"{to}"}
+                      </div>
+                    </div>
+
                     <For each={cfg().providers}>
                       {(provider) => (
                         <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">

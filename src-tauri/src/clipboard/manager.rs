@@ -29,7 +29,6 @@ pub enum ClipboardCaptureError {
     CopyShortcutFailed(String),
     CopyShortcutTimedOut,
     ClipboardUnchanged,
-    TextTooShort(usize),
 }
 
 impl ClipboardCaptureError {
@@ -52,9 +51,6 @@ impl ClipboardCaptureError {
             ClipboardCaptureError::ClipboardUnchanged => {
                 "No selected text captured. The target app did not respond to Cmd+C.".to_string()
             }
-            ClipboardCaptureError::TextTooShort(_) => {
-                "Selected text is too short to translate.".to_string()
-            }
         }
     }
 
@@ -73,11 +69,28 @@ impl ClipboardCaptureError {
             ClipboardCaptureError::ClipboardUnchanged => {
                 "Clipboard did not change after Cmd+C".to_string()
             }
-            ClipboardCaptureError::TextTooShort(length) => {
-                format!("Captured text too short: {} chars", length)
-            }
         }
     }
+}
+
+fn resolve_captured_text(
+    text: String,
+    sentinel: &str,
+    original_clipboard: &str,
+) -> Result<String, ClipboardCaptureError> {
+    if text != sentinel {
+        return Ok(text);
+    }
+
+    if !original_clipboard.trim().is_empty() {
+        log::warn!(
+            "[clipboard] Clipboard stayed on sentinel after Cmd+C; using previous clipboard text"
+        );
+        return Ok(original_clipboard.to_string());
+    }
+
+    log::warn!("[clipboard] Clipboard did not change after Cmd+C and previous clipboard was empty");
+    Err(ClipboardCaptureError::ClipboardUnchanged)
 }
 
 #[cfg(target_os = "macos")]
@@ -176,17 +189,7 @@ impl ClipboardManager {
         Self::restore_clipboard(&original_clipboard);
         log::debug!("[clipboard] Original clipboard restored");
 
-        // Validate
-        if text == sentinel {
-            log::warn!("[clipboard] Clipboard did not change after Cmd+C, skipping");
-            return Err(ClipboardCaptureError::ClipboardUnchanged);
-        }
-
-        if text.trim().len() < 2 {
-            let length = text.trim().len();
-            log::warn!("[clipboard] Text too short ({}), skipping", length);
-            return Err(ClipboardCaptureError::TextTooShort(length));
-        }
+        let text = resolve_captured_text(text, &sentinel, &original_clipboard)?;
 
         log::info!(
             "[clipboard] Captured selected text length: {} chars",
@@ -330,6 +333,38 @@ mod tests {
         assert_eq!(
             error.diagnostic_reason(),
             "Clipboard did not change after Cmd+C"
+        );
+    }
+
+    #[test]
+    fn single_character_capture_is_accepted() {
+        assert_eq!(
+            resolve_captured_text("a".to_string(), "__sentinel__", ""),
+            Ok("a".to_string())
+        );
+        assert_eq!(
+            resolve_captured_text("字".to_string(), "__sentinel__", ""),
+            Ok("字".to_string())
+        );
+    }
+
+    #[test]
+    fn previous_clipboard_is_used_when_sentinel_stays() {
+        assert_eq!(
+            resolve_captured_text(
+                "__sentinel__".to_string(),
+                "__sentinel__",
+                "already copied text"
+            ),
+            Ok("already copied text".to_string())
+        );
+    }
+
+    #[test]
+    fn unchanged_sentinel_with_empty_clipboard_is_rejected() {
+        assert_eq!(
+            resolve_captured_text("__sentinel__".to_string(), "__sentinel__", ""),
+            Err(ClipboardCaptureError::ClipboardUnchanged)
         );
     }
 }
