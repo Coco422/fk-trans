@@ -4,6 +4,7 @@ import { Router, Route } from "@solidjs/router";
 import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
 import FloatingPopup from "./components/FloatingPopup";
+import OcrSelectionOverlay from "./components/OcrSelectionOverlay";
 import "./styles/globals.css";
 
 function logFrontendEvent(
@@ -36,6 +37,7 @@ render(
     <Router>
       <Route path="/" component={App} />
       <Route path="/popup" component={FloatingPopup} />
+      <Route path="/ocr-select" component={OcrSelectionOverlay} />
     </Router>
   ),
   document.getElementById("root") as HTMLElement

@@ -29,6 +29,16 @@
         "width": 400,
         "height": 300,
         "url": "/popup"
+      },
+      {
+        "label": "ocr-select",
+        "visible": false,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "width": 800,
+        "height": 600,
+        "url": "/ocr-select"
       }
     ],
     "security": {

@@ -187,6 +187,11 @@ export default function FloatingPopup() {
                 {payload().result.targetLang ?? payload().result.target_lang}
               </div>
               <div class="flex items-center gap-2">
+                <Show when={payload().capture_source === "ocr"}>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300">
+                    OCR
+                  </span>
+                </Show>
                 <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500">
                   {payload().result.provider}
                 </span>

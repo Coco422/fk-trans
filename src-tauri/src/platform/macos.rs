@@ -96,3 +96,11 @@ pub fn open_accessibility_settings() -> Result<(), String> {
         .map_err(|e| format!("Failed to open Accessibility settings: {}", e))?;
     Ok(())
 }
+
+pub fn open_screen_recording_settings() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        .spawn()
+        .map_err(|e| format!("Failed to open Screen Recording settings: {}", e))?;
+    Ok(())
+}

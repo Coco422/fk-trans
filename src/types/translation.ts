@@ -14,6 +14,9 @@ export interface TranslationPayload {
   result: TranslateResult;
   cursor_x: number;
   cursor_y: number;
+  capture_source?: "clipboard" | "ocr";
+  ocr_backend?: "apple_vision";
+  ocr_elapsed_ms?: number;
 }
 
 export interface ProviderConfig {
@@ -26,6 +29,7 @@ export interface ProviderConfig {
 export interface AppConfig {
   enabled: boolean;
   debug_logging: boolean;
+  ocr_enabled: boolean;
   source_lang: string;
   target_lang: string;
   active_provider: string;

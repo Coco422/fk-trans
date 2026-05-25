@@ -25,6 +25,7 @@ pub enum MouseTriggerStatus {
 pub enum TriggerSource {
     MouseMiddle,
     KeyboardShortcut,
+    OcrShortcut,
     Test,
 }
 
@@ -161,6 +162,248 @@ impl Drop for MouseListener {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacosTapEventKind {
+    TapDisabled,
+    OtherMouseDown,
+    Ignored,
+    Invalid,
+}
+
+#[cfg(target_os = "macos")]
+fn classify_macos_tap_event(
+    event_type: core_graphics::event::CGEventType,
+    event_is_null: bool,
+) -> MacosTapEventKind {
+    use core_graphics::event::CGEventType;
+
+    match event_type {
+        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
+            MacosTapEventKind::TapDisabled
+        }
+        CGEventType::OtherMouseDown if event_is_null => MacosTapEventKind::Invalid,
+        CGEventType::OtherMouseDown => MacosTapEventKind::OtherMouseDown,
+        _ => MacosTapEventKind::Ignored,
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct RawMouseTapContext {
+    running: Arc<AtomicBool>,
+    restart_requested: Arc<AtomicBool>,
+    tx: Sender<MouseTriggerEvent>,
+    state: SharedMouseTriggerState,
+}
+
+#[cfg(target_os = "macos")]
+struct RawMacosEventTap {
+    mach_port: core_foundation::mach_port::CFMachPort,
+    _context: Box<RawMouseTapContext>,
+}
+
+#[cfg(target_os = "macos")]
+impl RawMacosEventTap {
+    fn new(
+        running: Arc<AtomicBool>,
+        tx: Sender<MouseTriggerEvent>,
+        restart_requested: Arc<AtomicBool>,
+        state: SharedMouseTriggerState,
+    ) -> Result<Self, ()> {
+        use core_foundation::base::TCFType;
+        use core_foundation::mach_port::CFMachPort;
+        use core_graphics::event::{
+            CGEventMask, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+        };
+        use std::ffi::c_void;
+
+        let context = Box::new(RawMouseTapContext {
+            running,
+            restart_requested,
+            tx,
+            state,
+        });
+        let context_ptr = Box::into_raw(context);
+        let event_mask = 1u64 << CGEventType::OtherMouseDown as CGEventMask;
+
+        let tap_ref = unsafe {
+            CGEventTapCreate(
+                CGEventTapLocation::HID,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::ListenOnly,
+                event_mask,
+                raw_macos_event_tap_callback,
+                context_ptr.cast::<c_void>(),
+            )
+        };
+
+        let context = unsafe { Box::from_raw(context_ptr) };
+        if tap_ref.is_null() {
+            return Err(());
+        }
+
+        let mach_port = unsafe { CFMachPort::wrap_under_create_rule(tap_ref) };
+        Ok(Self {
+            mach_port,
+            _context: context,
+        })
+    }
+
+    fn enable(&self) {
+        use core_foundation::base::TCFType;
+
+        unsafe {
+            CGEventTapEnable(self.mach_port.as_concrete_TypeRef(), true);
+        }
+    }
+
+    fn disable(&self) {
+        use core_foundation::base::TCFType;
+
+        unsafe {
+            CGEventTapEnable(self.mach_port.as_concrete_TypeRef(), false);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for RawMacosEventTap {
+    fn drop(&mut self) {
+        self.disable();
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn raw_macos_event_tap_callback(
+    _proxy: *const std::ffi::c_void,
+    event_type: core_graphics::event::CGEventType,
+    event: core_graphics::sys::CGEventRef,
+    user_info: *mut std::ffi::c_void,
+) -> core_graphics::sys::CGEventRef {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if user_info.is_null() {
+            log::error!("[mouse] macOS event tap callback missing context");
+            return;
+        }
+
+        let context = unsafe { &*(user_info as *const RawMouseTapContext) };
+        handle_raw_macos_tap_event(context, event_type, event);
+    }));
+
+    if result.is_err() {
+        log::error!("[mouse] macOS event tap callback panicked");
+    }
+
+    event
+}
+
+#[cfg(target_os = "macos")]
+fn handle_raw_macos_tap_event(
+    context: &RawMouseTapContext,
+    event_type: core_graphics::event::CGEventType,
+    event: core_graphics::sys::CGEventRef,
+) {
+    use core_foundation::runloop::CFRunLoop;
+    use core_graphics::event::{CGEventType, EventField};
+
+    match classify_macos_tap_event(event_type, event.is_null()) {
+        MacosTapEventKind::TapDisabled => {
+            let reason = format!("Event tap disabled by macOS: {:?}", event_type);
+            log::warn!("[mouse] {}", reason);
+            {
+                let mut guard = context
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.status = MouseTriggerStatus::Failed;
+                guard.last_error = Some(reason);
+            }
+            context.restart_requested.store(true, Ordering::SeqCst);
+            CFRunLoop::get_current().stop();
+        }
+        MacosTapEventKind::Invalid => {
+            log::warn!("[mouse] Ignoring macOS {:?} with null event", event_type);
+        }
+        MacosTapEventKind::Ignored => {}
+        MacosTapEventKind::OtherMouseDown => {
+            if !context.running.load(Ordering::SeqCst)
+                || !matches!(event_type, CGEventType::OtherMouseDown)
+            {
+                return;
+            }
+
+            let button = unsafe {
+                CGEventGetIntegerValueField(event, EventField::MOUSE_EVENT_BUTTON_NUMBER)
+            };
+            let timestamp_ms = now_millis();
+            let is_trigger = {
+                let mut guard = context
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let is_trigger = button == guard.trigger_button;
+                guard.status = MouseTriggerStatus::EventReceived;
+                guard.accessibility_trusted = true;
+                guard.last_button = Some(button);
+                guard.last_event_at = Some(timestamp_ms);
+                guard.last_error = None;
+                if is_trigger {
+                    guard.last_trigger_at = Some(timestamp_ms);
+                    guard.last_pipeline_result =
+                        Some(format!("Trigger button {} received", button));
+                } else if guard
+                    .test_active_until
+                    .is_some_and(|until| until > timestamp_ms)
+                {
+                    guard.last_pipeline_result = Some(format!(
+                        "Received button {}, configured trigger is {}",
+                        button, guard.trigger_button
+                    ));
+                }
+                is_trigger
+            };
+
+            log::info!(
+                "[mouse] OtherMouseDown received: button={}, trigger={}",
+                button,
+                is_trigger
+            );
+            let _ = context.tx.send(MouseTriggerEvent {
+                button,
+                is_trigger,
+                timestamp_ms,
+            });
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventTapCreate(
+        tap: core_graphics::event::CGEventTapLocation,
+        place: core_graphics::event::CGEventTapPlacement,
+        options: core_graphics::event::CGEventTapOptions,
+        events_of_interest: core_graphics::event::CGEventMask,
+        callback: unsafe extern "C" fn(
+            proxy: *const std::ffi::c_void,
+            event_type: core_graphics::event::CGEventType,
+            event: core_graphics::sys::CGEventRef,
+            user_info: *mut std::ffi::c_void,
+        ) -> core_graphics::sys::CGEventRef,
+        user_info: *mut std::ffi::c_void,
+    ) -> core_foundation::mach_port::CFMachPortRef;
+
+    fn CGEventTapEnable(tap: core_foundation::mach_port::CFMachPortRef, enable: bool);
+
+    fn CGEventGetIntegerValueField(
+        event: core_graphics::sys::CGEventRef,
+        field: core_graphics::event::CGEventField,
+    ) -> i64;
+}
+
+#[cfg(target_os = "macos")]
 fn start_platform_listener(
     running: Arc<AtomicBool>,
     tx: Sender<MouseTriggerEvent>,
@@ -168,10 +411,6 @@ fn start_platform_listener(
 ) {
     use crate::platform;
     use core_foundation::runloop::{kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop};
-    use core_graphics::event::{
-        CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
-        EventField,
-    };
     use std::time::Duration;
 
     std::thread::spawn(move || {
@@ -218,82 +457,11 @@ fn start_platform_listener(
             }
 
             let restart_requested = Arc::new(AtomicBool::new(false));
-            let callback_running = running.clone();
-            let callback_tx = tx.clone();
-            let callback_restart = restart_requested.clone();
-            let callback_state = state.clone();
-
-            let tap = CGEventTap::new(
-                CGEventTapLocation::HID,
-                CGEventTapPlacement::HeadInsertEventTap,
-                CGEventTapOptions::ListenOnly,
-                vec![CGEventType::OtherMouseDown],
-                move |_proxy, event_type, event| {
-                    if matches!(
-                        event_type,
-                        CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
-                    ) {
-                        let reason = format!("Event tap disabled by macOS: {:?}", event_type);
-                        log::warn!("[mouse] {}", reason);
-                        {
-                            let mut guard = callback_state
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            guard.status = MouseTriggerStatus::Failed;
-                            guard.last_error = Some(reason);
-                        }
-                        callback_restart.store(true, Ordering::SeqCst);
-                        CFRunLoop::get_current().stop();
-                        return None;
-                    }
-
-                    if !callback_running.load(Ordering::SeqCst)
-                        || !matches!(event_type, CGEventType::OtherMouseDown)
-                    {
-                        return None;
-                    }
-
-                    let button =
-                        event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER);
-                    let timestamp_ms = now_millis();
-                    let is_trigger = {
-                        let mut guard = callback_state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        let is_trigger = button == guard.trigger_button;
-                        guard.status = MouseTriggerStatus::EventReceived;
-                        guard.accessibility_trusted = true;
-                        guard.last_button = Some(button);
-                        guard.last_event_at = Some(timestamp_ms);
-                        guard.last_error = None;
-                        if is_trigger {
-                            guard.last_trigger_at = Some(timestamp_ms);
-                            guard.last_pipeline_result =
-                                Some(format!("Trigger button {} received", button));
-                        } else if guard
-                            .test_active_until
-                            .is_some_and(|until| until > timestamp_ms)
-                        {
-                            guard.last_pipeline_result = Some(format!(
-                                "Received button {}, configured trigger is {}",
-                                button, guard.trigger_button
-                            ));
-                        }
-                        is_trigger
-                    };
-
-                    log::info!(
-                        "[mouse] OtherMouseDown received: button={}, trigger={}",
-                        button,
-                        is_trigger
-                    );
-                    let _ = callback_tx.send(MouseTriggerEvent {
-                        button,
-                        is_trigger,
-                        timestamp_ms,
-                    });
-                    None
-                },
+            let tap = RawMacosEventTap::new(
+                running.clone(),
+                tx.clone(),
+                restart_requested.clone(),
+                state.clone(),
             );
 
             let Ok(tap) = tap else {
@@ -355,6 +523,9 @@ fn start_platform_listener(
                     false,
                 );
             }
+
+            tap.disable();
+            current_loop.remove_source(&loop_source, unsafe { kCFRunLoopCommonModes });
 
             if running.load(Ordering::SeqCst) {
                 log::info!("[mouse] Rebuilding CoreGraphics event tap");
@@ -424,4 +595,44 @@ fn start_platform_listener(
             guard.last_error = Some(reason);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "macos")]
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_tap_disabled_is_handled_before_event_pointer_is_used() {
+        use core_graphics::event::CGEventType;
+
+        assert_eq!(
+            classify_macos_tap_event(CGEventType::TapDisabledByUserInput, true),
+            MacosTapEventKind::TapDisabled
+        );
+        assert_eq!(
+            classify_macos_tap_event(CGEventType::TapDisabledByTimeout, true),
+            MacosTapEventKind::TapDisabled
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_other_mouse_down_requires_non_null_event() {
+        use core_graphics::event::CGEventType;
+
+        assert_eq!(
+            classify_macos_tap_event(CGEventType::OtherMouseDown, true),
+            MacosTapEventKind::Invalid
+        );
+        assert_eq!(
+            classify_macos_tap_event(CGEventType::OtherMouseDown, false),
+            MacosTapEventKind::OtherMouseDown
+        );
+        assert_eq!(
+            classify_macos_tap_event(CGEventType::OtherMouseUp, false),
+            MacosTapEventKind::Ignored
+        );
+    }
 }

@@ -19,6 +19,7 @@ interface ProviderConfig {
 interface AppConfig {
   enabled: boolean;
   debug_logging: boolean;
+  ocr_enabled: boolean;
   source_lang: string;
   target_lang: string;
   active_provider: string;
@@ -78,6 +79,16 @@ interface DiagnosticsSnapshot {
   log_rotation_keep_files: number;
   accessibility_trusted: boolean;
   mouse: MouseTriggerState;
+  ocr: {
+    enabled: boolean;
+    backend: string;
+    ready: boolean;
+    reason?: string | null;
+    screen_capture_ready: boolean;
+    last_result?: string | null;
+    last_error?: string | null;
+    last_elapsed_ms?: number | null;
+  };
   active_provider_ready: boolean;
   active_provider_reason?: string | null;
   providers: Array<{
@@ -245,6 +256,15 @@ export default function App() {
     try {
       await invoke("open_accessibility_settings");
       setDiagnosticsMessage("Opened macOS Accessibility settings.");
+    } catch (e) {
+      setDiagnosticsMessage(String(e));
+    }
+  }
+
+  async function openScreenRecordingSettings() {
+    try {
+      await invoke("open_screen_recording_settings");
+      setDiagnosticsMessage("Opened macOS Screen Recording settings.");
     } catch (e) {
       setDiagnosticsMessage(String(e));
     }
@@ -602,6 +622,34 @@ export default function App() {
                       </button>
                     </div>
 
+                    {/* OCR toggle */}
+                    <div class="flex items-center justify-between p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                      <div>
+                        <div class="text-sm font-medium">OCR Shortcut</div>
+                        <div class="text-xs text-gray-500">
+                          Cmd+Shift+O screenshot region translation
+                        </div>
+                      </div>
+                      <button
+                        class={`w-11 h-6 rounded-full transition-colors cursor-pointer ${
+                          cfg().ocr_enabled
+                            ? "bg-blue-500"
+                            : "bg-gray-300 dark:bg-gray-700"
+                        }`}
+                        onClick={() =>
+                          saveConfig({ ocr_enabled: !cfg().ocr_enabled })
+                        }
+                      >
+                        <div
+                          class={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
+                            cfg().ocr_enabled
+                              ? "translate-x-[22px]"
+                              : "translate-x-[2px]"
+                          }`}
+                        />
+                      </button>
+                    </div>
+
                     {/* Language pair */}
                     <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
                       <div class="text-sm font-medium mb-3">Language Pair</div>
@@ -675,6 +723,12 @@ export default function App() {
                             Cmd+Shift+T
                           </kbd>{" "}
                           fallback shortcut to translate selection
+                        </div>
+                        <div>
+                          <kbd class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[11px] font-mono">
+                            Cmd+Shift+O
+                          </kbd>{" "}
+                          OCR screenshot region translation
                         </div>
                         <div>
                           <kbd class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[11px] font-mono">
@@ -1018,6 +1072,77 @@ export default function App() {
                               >
                                 Use button {diag().mouse.last_button} as trigger
                               </button>
+                            </Show>
+                          </div>
+
+                          <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                            <div class="flex items-start justify-between gap-4 mb-4">
+                              <div>
+                                <div class="text-sm font-medium">OCR</div>
+                                <div
+                                  class={`mt-1 text-xs ${
+                                    diag().ocr.ready
+                                      ? "text-green-500"
+                                      : "text-red-500"
+                                  }`}
+                                >
+                                  {diag().ocr.ready
+                                    ? "Ready"
+                                    : diag().ocr.reason || "Not ready"}
+                                </div>
+                              </div>
+                              <button
+                                class="text-xs px-3 py-2 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors cursor-pointer"
+                                onClick={openScreenRecordingSettings}
+                              >
+                                Screen Recording
+                              </button>
+                            </div>
+
+                            <div class="grid grid-cols-2 gap-3 text-xs">
+                              <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
+                                <div class="text-gray-400 mb-1">Backend</div>
+                                <div class="font-mono">{diag().ocr.backend}</div>
+                              </div>
+                              <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
+                                <div class="text-gray-400 mb-1">Shortcut</div>
+                                <div class="font-mono">
+                                  {diag().ocr.enabled ? "enabled" : "disabled"}
+                                </div>
+                              </div>
+                              <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
+                                <div class="text-gray-400 mb-1">Screen Capture</div>
+                                <div
+                                  class={
+                                    diag().ocr.screen_capture_ready
+                                      ? "text-green-500"
+                                      : "text-red-500"
+                                  }
+                                >
+                                  {diag().ocr.screen_capture_ready
+                                    ? "Ready"
+                                    : "Not ready"}
+                                </div>
+                              </div>
+                              <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
+                                <div class="text-gray-400 mb-1">Last OCR</div>
+                                <div class="font-mono">
+                                  {diag().ocr.last_elapsed_ms
+                                    ? `${diag().ocr.last_elapsed_ms} ms`
+                                    : "None"}
+                                </div>
+                              </div>
+                            </div>
+
+                            <Show when={diag().ocr.last_result}>
+                              <div class="mt-3 text-xs p-3 rounded bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-300">
+                                {diag().ocr.last_result}
+                              </div>
+                            </Show>
+                            <Show when={diag().ocr.last_error}>
+                              <div class="mt-3 text-xs p-3 rounded bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300">
+                                {diag().ocr.last_error}
+                              </div>
                             </Show>
                           </div>
 

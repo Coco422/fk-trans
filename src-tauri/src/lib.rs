@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod history;
 mod mouse;
+mod ocr;
 mod platform;
 mod translate;
 mod tray;
@@ -14,7 +15,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use tauri::{Emitter, Manager, PhysicalPosition};
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize};
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 use translate::provider::TranslateError;
@@ -33,16 +34,27 @@ pub struct AppState {
     pub history: HistoryStore,
     pub mouse_listener: Mutex<Option<mouse::listener::MouseListener>>,
     pub mouse_trigger_state: mouse::listener::SharedMouseTriggerState,
+    pub ocr_runtime: ocr::OcrRuntime,
+    pub pipeline_running: Arc<AtomicBool>,
 }
 
-struct PipelineGuard {
-    running: Arc<AtomicBool>,
+pub(crate) struct PipelineGuard {
+    pub(crate) running: Arc<AtomicBool>,
 }
 
 impl Drop for PipelineGuard {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum CaptureMetadata {
+    Clipboard,
+    Ocr {
+        backend: &'static str,
+        elapsed_ms: u64,
+    },
 }
 
 fn current_cursor_position(app: &tauri::AppHandle) -> PhysicalPosition<f64> {
@@ -90,7 +102,7 @@ fn popup_position_for_cursor(
     PhysicalPosition::new(x.round() as i32, y.round() as i32)
 }
 
-fn show_popup_at_cursor(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
+pub(crate) fn show_popup_at_cursor(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
     if let Some(window) = app.get_webview_window("popup") {
         let popup_pos = popup_position_for_cursor(&window, cursor);
         log::info!(
@@ -108,7 +120,7 @@ fn show_popup_error(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, messa
     let _ = app.emit("translation-error", message);
 }
 
-fn emit_mouse_trigger_state(app: &tauri::AppHandle) {
+pub(crate) fn emit_mouse_trigger_state(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
         let snapshot = mouse::listener::snapshot(&state.mouse_trigger_state);
         let _ = app.emit("mouse-trigger-state", snapshot);
@@ -145,6 +157,94 @@ fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         log::error!("[panic] {}", info);
     }));
+}
+
+fn translation_payload(
+    text: String,
+    result: translate::provider::TranslateResult,
+    popup_anchor: PhysicalPosition<f64>,
+    capture: CaptureMetadata,
+) -> serde_json::Value {
+    let capture_source = match capture {
+        CaptureMetadata::Clipboard => "clipboard",
+        CaptureMetadata::Ocr { .. } => "ocr",
+    };
+    let mut payload = serde_json::json!({
+        "original": text,
+        "result": result,
+        "cursor_x": popup_anchor.x,
+        "cursor_y": popup_anchor.y,
+        "capture_source": capture_source,
+    });
+    if let CaptureMetadata::Ocr {
+        backend,
+        elapsed_ms,
+    } = capture
+    {
+        payload["ocr_backend"] = serde_json::json!(backend);
+        payload["ocr_elapsed_ms"] = serde_json::json!(elapsed_ms);
+    }
+    payload
+}
+
+pub async fn translate_and_emit(
+    app: tauri::AppHandle,
+    text: String,
+    popup_anchor: PhysicalPosition<f64>,
+    capture: CaptureMetadata,
+) {
+    let state = app.state::<AppState>();
+    let (source_lang, target_lang) = {
+        let config = state.config.lock().unwrap();
+        (config.source_lang.clone(), config.target_lang.clone())
+    };
+
+    let engine = state.translation_engine.read().await;
+    match engine.translate(&text, &source_lang, &target_lang).await {
+        Ok(result) => {
+            let capture_source = match capture {
+                CaptureMetadata::Clipboard => "clipboard",
+                CaptureMetadata::Ocr { .. } => "ocr",
+            };
+            let success_message = format!(
+                "Success: translated {} chars from {} with {}",
+                text.chars().count(),
+                capture_source,
+                result.provider
+            );
+            if matches!(capture, CaptureMetadata::Clipboard) {
+                state.history.add(history::HistoryEntry {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    timestamp: chrono::Utc::now().timestamp(),
+                    original: text.clone(),
+                    translated: result.translated.clone(),
+                    source_lang: result.source_lang.clone(),
+                    target_lang: result.target_lang.clone(),
+                    provider: result.provider.clone(),
+                });
+            }
+
+            let payload = translation_payload(text, result, popup_anchor, capture);
+            let _ = app.emit("translation-ready", payload);
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                success_message,
+                None,
+            );
+            emit_mouse_trigger_state(&app);
+        }
+        Err(e) => {
+            let error_kind = translate_error_kind(&e);
+            log::error!("[pipeline] Translation error kind={}", error_kind);
+            let _ = app.emit("translation-error", e.to_string());
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                "Failed: translation error",
+                Some(format!("Translation error kind: {}", error_kind)),
+            );
+            emit_mouse_trigger_state(&app);
+        }
+    }
 }
 
 /// Shared translation pipeline: capture clipboard, translate, show popup.
@@ -271,60 +371,157 @@ async fn run_translation_pipeline(
         }
     };
 
-    // Get config values
-    let state = app.state::<AppState>();
-    let (source_lang, target_lang) = {
-        let config = state.config.lock().unwrap();
-        (config.source_lang.clone(), config.target_lang.clone())
-    };
+    translate_and_emit(app, text, cursor_pos, CaptureMetadata::Clipboard).await;
+}
 
-    // Translate
-    let engine = state.translation_engine.read().await;
-    match engine.translate(&text, &source_lang, &target_lang).await {
-        Ok(result) => {
-            let success_message = format!(
-                "Success: translated {} chars with {}",
-                text.chars().count(),
-                result.provider
-            );
-            state.history.add(history::HistoryEntry {
-                id: uuid::Uuid::new_v4().to_string(),
-                timestamp: chrono::Utc::now().timestamp(),
-                original: text.clone(),
-                translated: result.translated.clone(),
-                source_lang: result.source_lang.clone(),
-                target_lang: result.target_lang.clone(),
-                provider: result.provider.clone(),
-            });
+fn validate_ocr_start_with_platform(
+    config: &AppConfig,
+    platform_ready: bool,
+) -> Result<(), String> {
+    if !config.enabled {
+        return Err("fk-trans is disabled".to_string());
+    }
+    if !config.ocr_enabled {
+        return Err("OCR shortcut is disabled".to_string());
+    }
+    if !platform_ready {
+        return Err("OCR is only implemented on macOS in this version".to_string());
+    }
+    config::validate_active_provider(config)
+}
 
-            let _ = app.emit(
-                "translation-ready",
-                serde_json::json!({
-                    "original": text,
-                    "result": result,
-                    "cursor_x": cursor_pos.x,
-                    "cursor_y": cursor_pos.y,
-                }),
-            );
+async fn start_ocr_selection_pipeline(app: tauri::AppHandle, running: Arc<AtomicBool>) {
+    if running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        log::info!("[ocr] Previous pipeline still running, skipping OCR trigger");
+        if let Some(state) = app.try_state::<AppState>() {
+            state
+                .ocr_runtime
+                .mark_result("OCR skipped: previous pipeline still running", None);
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
-                success_message,
+                "Skipped: previous pipeline still running",
                 None,
             );
             emit_mouse_trigger_state(&app);
         }
-        Err(e) => {
-            let error_kind = translate_error_kind(&e);
-            log::error!("[pipeline] Translation error kind={}", error_kind);
-            let _ = app.emit("translation-error", e.to_string());
+        return;
+    }
+
+    log::info!("[ocr] Cmd+Shift+O triggered");
+    let cursor_pos = current_cursor_position(&app);
+    let state = app.state::<AppState>();
+    mouse::listener::mark_pipeline_triggered(
+        &state.mouse_trigger_state,
+        TriggerSource::OcrShortcut,
+    );
+    emit_mouse_trigger_state(&app);
+
+    let readiness = {
+        let config = state.config.lock().unwrap();
+        validate_ocr_start_with_platform(&config, cfg!(target_os = "macos"))
+    };
+    if let Err(reason) = readiness {
+        log::warn!("[ocr] OCR start skipped: {}", reason);
+        state.ocr_runtime.mark_error(reason.clone());
+        show_popup_error(&app, cursor_pos, reason.clone());
+        mouse::listener::mark_pipeline_result(
+            &state.mouse_trigger_state,
+            "Failed: OCR unavailable",
+            Some(reason),
+        );
+        emit_mouse_trigger_state(&app);
+        running.store(false, Ordering::SeqCst);
+        return;
+    }
+
+    let payload = match state.ocr_runtime.start_selection_session(cursor_pos) {
+        Ok(payload) => payload,
+        Err(error) => {
+            log::warn!("[ocr] Screen capture failed: {}", error);
+            show_popup_error(
+                &app,
+                cursor_pos,
+                "Screen capture failed. Check macOS Screen Recording permission.".to_string(),
+            );
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
-                "Failed: translation error",
-                Some(format!("Translation error kind: {}", error_kind)),
+                "Failed: OCR screen capture failed",
+                Some(error),
             );
             emit_mouse_trigger_state(&app);
+            running.store(false, Ordering::SeqCst);
+            return;
         }
+    };
+
+    let Some(window) = app.get_webview_window("ocr-select") else {
+        let error = "OCR selection window is unavailable".to_string();
+        state.ocr_runtime.mark_error(error.clone());
+        show_popup_error(&app, cursor_pos, error.clone());
+        mouse::listener::mark_pipeline_result(
+            &state.mouse_trigger_state,
+            "Failed: OCR selection window unavailable",
+            Some(error),
+        );
+        emit_mouse_trigger_state(&app);
+        running.store(false, Ordering::SeqCst);
+        return;
+    };
+
+    let _ = window.set_position(tauri::Position::Physical(PhysicalPosition::new(
+        payload.monitor_x,
+        payload.monitor_y,
+    )));
+    let _ = window.set_size(tauri::Size::Physical(PhysicalSize::new(
+        payload.monitor_width,
+        payload.monitor_height,
+    )));
+    let _ = window.show();
+    let _ = window.set_focus();
+    #[cfg(target_os = "macos")]
+    platform::macos::focus_window(&window);
+    let _ = window.emit("ocr-selection-started", payload);
+}
+
+fn ocr_shortcut() -> tauri_plugin_global_shortcut::Shortcut {
+    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
+
+    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyO)
+}
+
+pub(crate) fn register_ocr_shortcut(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+
+    let shortcut = ocr_shortcut();
+    let gs = app.global_shortcut();
+    if gs.is_registered(shortcut) {
+        return Ok(());
     }
+    let running = app.state::<AppState>().pipeline_running.clone();
+    gs.on_shortcut(shortcut, move |app_handle, _shortcut, event| {
+        if event.state != ShortcutState::Released {
+            return;
+        }
+
+        let app = app_handle.clone();
+        let running = running.clone();
+        tauri::async_runtime::spawn(start_ocr_selection_pipeline(app, running));
+    })
+    .map_err(|e| e.to_string())
+}
+
+pub(crate) fn unregister_ocr_shortcut(app: &tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    let shortcut = ocr_shortcut();
+    let gs = app.global_shortcut();
+    if gs.is_registered(shortcut) {
+        gs.unregister(shortcut).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -383,8 +580,10 @@ pub fn run() {
             );
             let active_provider = config.active_provider.clone();
             let provider_configs = config.providers.clone();
+            let ocr_enabled = config.ocr_enabled;
             let mouse_trigger_state =
                 mouse::listener::new_shared_state(config.mouse_trigger_button);
+            let pipeline_running = Arc::new(AtomicBool::new(false));
 
             app.manage(AppState {
                 config: Mutex::new(config),
@@ -395,6 +594,8 @@ pub fn run() {
                 history: HistoryStore::new(),
                 mouse_listener: Mutex::new(None),
                 mouse_trigger_state: mouse_trigger_state.clone(),
+                ocr_runtime: ocr::OcrRuntime::new(),
+                pipeline_running: pipeline_running.clone(),
             });
 
             // Create system tray
@@ -410,7 +611,6 @@ pub fn run() {
 
             // Shared clipboard manager
             let clipboard_manager = Arc::new(clipboard::manager::ClipboardManager::new());
-            let pipeline_running = Arc::new(AtomicBool::new(false));
 
             // --- Mouse listener pipeline ---
             let app_handle = app.handle().clone();
@@ -489,6 +689,15 @@ pub fn run() {
                 Err(e) => log::error!("[shortcut] Failed to register Cmd+Shift+T: {}", e),
             }
 
+            if ocr_enabled {
+                match register_ocr_shortcut(app.handle()) {
+                    Ok(_) => log::info!("[shortcut] Cmd+Shift+O registered successfully"),
+                    Err(e) => log::error!("[shortcut] Failed to register Cmd+Shift+O: {}", e),
+                }
+            } else {
+                log::info!("[shortcut] Cmd+Shift+O not registered because OCR is disabled");
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -506,6 +715,10 @@ pub fn run() {
             commands::diagnostics::reveal_diagnostics_folder,
             commands::diagnostics::open_accessibility_settings,
             commands::diagnostics::log_frontend_event,
+            commands::ocr::get_ocr_selection_payload,
+            commands::ocr::complete_ocr_selection,
+            commands::ocr::cancel_ocr_selection,
+            commands::ocr::open_screen_recording_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -524,5 +737,53 @@ mod tests {
     #[test]
     fn clipboard_capture_timeout_is_short() {
         assert!(CLIPBOARD_CAPTURE_TIMEOUT <= Duration::from_secs(5));
+    }
+
+    #[test]
+    fn ocr_disabled_rejects_start_before_provider_validation() {
+        let config = AppConfig {
+            ocr_enabled: false,
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            validate_ocr_start_with_platform(&config, true),
+            Err("OCR shortcut is disabled".to_string())
+        );
+    }
+
+    #[test]
+    fn translation_payload_marks_clipboard_and_ocr_sources() {
+        let result = translate::provider::TranslateResult {
+            original: "hello".to_string(),
+            translated: "你好".to_string(),
+            source_lang: "en".to_string(),
+            target_lang: "zh".to_string(),
+            provider: "test".to_string(),
+            alternatives: vec![],
+        };
+        let anchor = PhysicalPosition::new(1.0, 2.0);
+
+        let clipboard = translation_payload(
+            "hello".to_string(),
+            result.clone(),
+            anchor,
+            CaptureMetadata::Clipboard,
+        );
+        let ocr = translation_payload(
+            "hello".to_string(),
+            result,
+            anchor,
+            CaptureMetadata::Ocr {
+                backend: "apple_vision",
+                elapsed_ms: 42,
+            },
+        );
+
+        assert_eq!(clipboard["capture_source"], "clipboard");
+        assert!(clipboard.get("ocr_backend").is_none());
+        assert_eq!(ocr["capture_source"], "ocr");
+        assert_eq!(ocr["ocr_backend"], "apple_vision");
+        assert_eq!(ocr["ocr_elapsed_ms"], 42);
     }
 }

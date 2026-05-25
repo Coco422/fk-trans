@@ -6,6 +6,10 @@ import { dirname, join } from "node:path";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const appSource = readFileSync(join(root, "src", "App.tsx"), "utf8");
 const argsSource = readFileSync(join(root, "src", "tauriArgs.ts"), "utf8");
+const ocrOverlaySource = readFileSync(
+  join(root, "src", "components", "OcrSelectionOverlay.tsx"),
+  "utf8"
+);
 
 assert.match(
   appSource,
@@ -21,4 +25,16 @@ assert.doesNotMatch(
   appSource,
   /invoke\("update_provider",\s*\{[\s\S]*?base_url:/,
   "update_provider cannot pass snake_case keys to Tauri"
+);
+
+assert.match(
+  ocrOverlaySource,
+  /invoke\("complete_ocr_selection",\s*\{[\s\S]*?sessionId:/,
+  "complete_ocr_selection must pass camelCase sessionId"
+);
+
+assert.doesNotMatch(
+  ocrOverlaySource,
+  /invoke\("complete_ocr_selection",\s*\{[\s\S]*?session_id:/,
+  "complete_ocr_selection cannot pass snake_case session_id"
 );

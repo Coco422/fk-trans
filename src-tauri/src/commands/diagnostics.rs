@@ -1,5 +1,6 @@
 use crate::config::{self, AppConfig};
 use crate::mouse::listener::{self, MouseTriggerState};
+use crate::ocr::OcrDiagnostic;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ pub struct DiagnosticsSnapshot {
     pub log_rotation_keep_files: usize,
     pub accessibility_trusted: bool,
     pub mouse: MouseTriggerState,
+    pub ocr: OcrDiagnostic,
     pub active_provider_ready: bool,
     pub active_provider_reason: Option<String>,
     pub providers: Vec<ProviderDiagnostic>,
@@ -64,6 +66,9 @@ fn app_log_dir(app: &AppHandle) -> Option<PathBuf> {
 fn sanitize_line(line: &str) -> String {
     if line.contains("[clipboard] Captured:") {
         return "[clipboard] Captured: [redacted]".to_string();
+    }
+    if line.contains("[ocr] Recognized") {
+        return "[ocr] Recognized: [redacted]".to_string();
     }
     if line.contains("Translation error:") {
         return "[pipeline] Translation error: [redacted]".to_string();
@@ -184,6 +189,16 @@ provider_readiness:
   active_provider_reason: {}
 {}
 
+ocr:
+  enabled: {}
+  backend: {}
+  ready: {}
+  reason: {}
+  screen_capture_ready: {}
+  last_result: {}
+  last_error: {}
+  last_elapsed_ms: {}
+
 recent_logs:
 {}
 "#,
@@ -207,6 +222,18 @@ recent_logs:
         snapshot.active_provider_ready,
         snapshot.active_provider_reason.as_deref().unwrap_or("none"),
         provider_lines,
+        snapshot.ocr.enabled,
+        snapshot.ocr.backend,
+        snapshot.ocr.ready,
+        snapshot.ocr.reason.as_deref().unwrap_or("none"),
+        snapshot.ocr.screen_capture_ready,
+        snapshot.ocr.last_result.as_deref().unwrap_or("none"),
+        snapshot.ocr.last_error.as_deref().unwrap_or("none"),
+        snapshot
+            .ocr
+            .last_elapsed_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
         if log_lines.is_empty() {
             "(no log lines found)".to_string()
         } else {
@@ -249,6 +276,7 @@ fn current_snapshot(app: &AppHandle, state: &AppState) -> DiagnosticsSnapshot {
         log_rotation_keep_files: crate::LOG_ROTATION_KEEP_FILES,
         accessibility_trusted: mouse.accessibility_trusted,
         mouse,
+        ocr: state.ocr_runtime.snapshot(config.ocr_enabled),
         active_provider_ready: active_readiness.is_ok(),
         active_provider_reason: active_readiness.err(),
         providers: provider_diagnostics(&config),

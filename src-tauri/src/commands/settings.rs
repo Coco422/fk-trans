@@ -10,7 +10,7 @@ use crate::{
     AppState,
 };
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 fn translate_error_kind(error: &TranslateError) -> &'static str {
     match error {
@@ -29,6 +29,7 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<config::AppConfig,
 
 #[tauri::command]
 pub async fn update_config(
+    app: AppHandle,
     updates: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<config::AppConfig, String> {
@@ -40,6 +41,9 @@ pub async fn update_config(
         }
         if let Some(debug_logging) = updates.get("debug_logging").and_then(|v| v.as_bool()) {
             config.debug_logging = debug_logging;
+        }
+        if let Some(ocr_enabled) = updates.get("ocr_enabled").and_then(|v| v.as_bool()) {
+            config.ocr_enabled = ocr_enabled;
         }
         if let Some(lang) = updates.get("source_lang").and_then(|v| v.as_str()) {
             config.source_lang = lang.to_string();
@@ -78,6 +82,16 @@ pub async fn update_config(
                 "disabled"
             }
         );
+    }
+    if updates.get("ocr_enabled").is_some() {
+        if result.ocr_enabled {
+            crate::register_ocr_shortcut(&app)?;
+            log::info!("[settings] OCR shortcut enabled");
+        } else {
+            crate::unregister_ocr_shortcut(&app)?;
+            state.ocr_runtime.mark_result("OCR shortcut disabled", None);
+            log::info!("[settings] OCR shortcut disabled");
+        }
     }
 
     Ok(result)
