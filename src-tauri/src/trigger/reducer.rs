@@ -35,6 +35,13 @@ pub const DOUBLE_CLICK_INTERVAL_MS: i64 = 400;
 /// cannot be confused with the drag threshold above.
 pub const DOUBLE_CLICK_SLOP_PX: f64 = 6.0;
 
+/// How far the wheel has to turn before it counts as the user moving on.
+///
+/// Trackpads emit scroll events for the faintest touch, and dismissing the
+/// trigger point on those would make it disappear when someone brushed the
+/// surface on their way to the keyboard.
+pub const SCROLL_DISMISS_PX: f64 = 80.0;
+
 /// The settings the reducer needs, read from the shared state once per event so
 /// the decision itself stays a pure function of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,20 +51,43 @@ pub struct TriggerOptions {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PointerEventKind {
-    ButtonDown,
-    ButtonUp,
+pub enum ButtonEvent {
+    Down,
+    Up,
 }
 
-/// One mouse event, as much of it as the decision needs.
+/// One event from the tap, as much of it as the decision needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PointerEvent {
-    pub kind: PointerEventKind,
-    /// 0 for the left button, otherwise the number macOS reports.
-    pub button: i64,
-    pub x: f64,
-    pub y: f64,
-    pub timestamp_ms: i64,
+pub enum PointerEvent {
+    Button {
+        kind: ButtonEvent,
+        /// 0 for the left button, otherwise the number macOS reports.
+        button: i64,
+        x: f64,
+        y: f64,
+        timestamp_ms: i64,
+    },
+    /// The wheel or the trackpad moved by `delta` points.
+    Scroll { delta: f64, timestamp_ms: i64 },
+}
+
+impl PointerEvent {
+    /// Where the pointer was, for the events that happen at a place.
+    ///
+    /// A scroll has a location too, but it is not what a scroll means: the point
+    /// goes away whoever the pointer is over.
+    pub fn position(&self) -> Option<(f64, f64)> {
+        match self {
+            Self::Button { x, y, .. } => Some((*x, *y)),
+            Self::Scroll { .. } => None,
+        }
+    }
+
+    pub fn timestamp_ms(&self) -> i64 {
+        match self {
+            Self::Button { timestamp_ms, .. } | Self::Scroll { timestamp_ms, .. } => *timestamp_ms,
+        }
+    }
 }
 
 /// An event that could have triggered a translation but did not. Recorded so a
@@ -88,6 +118,26 @@ impl Ignored {
     }
 }
 
+/// Why whatever the trigger was showing should go away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DismissReason {
+    /// The user clicked somewhere else, which is as clear a way as any of saying
+    /// they are done with what was on screen.
+    Clicked,
+    /// The wheel turned far enough. Scrolling inside the app being read almost
+    /// always means the selection has moved or gone.
+    Scrolled,
+}
+
+impl DismissReason {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Clicked => "the user clicked elsewhere",
+            Self::Scrolled => "the view behind it scrolled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     /// Nothing to do. Most events, including ordinary clicks.
@@ -97,6 +147,12 @@ pub enum Decision {
     /// A gesture that would have translated something, declined for a reason
     /// worth reporting.
     Ignored(Ignored),
+    /// Whatever the panel is showing should go.
+    ///
+    /// Deliberately unconditional: the reducer does not know what is on screen,
+    /// so it reports the event and lets the panel decide whether it applies. One
+    /// place knows whether the point is showing, and it is not here.
+    Dismiss(DismissReason),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -128,32 +184,64 @@ fn distance(ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
 
 impl TriggerReducer {
     pub fn reduce(&mut self, event: PointerEvent, options: TriggerOptions) -> Decision {
-        match event.kind {
-            PointerEventKind::ButtonDown => self.press(event, options),
-            PointerEventKind::ButtonUp => self.release(event, options),
+        match event {
+            PointerEvent::Button {
+                kind: ButtonEvent::Down,
+                button,
+                x,
+                y,
+                timestamp_ms,
+            } => self.press(button, x, y, timestamp_ms, options),
+            PointerEvent::Button {
+                kind: ButtonEvent::Up,
+                button,
+                x,
+                y,
+                timestamp_ms,
+            } => self.release(button, x, y, timestamp_ms, options),
+            PointerEvent::Scroll { delta, .. } => {
+                if delta.abs() < SCROLL_DISMISS_PX {
+                    Decision::Quiet
+                } else {
+                    Decision::Dismiss(DismissReason::Scrolled)
+                }
+            }
         }
     }
 
     /// The trigger button fires on the press, so a translation starts on the
     /// middle-click itself rather than when the button comes back up.
-    fn press(&mut self, event: PointerEvent, options: TriggerOptions) -> Decision {
-        if event.button == options.trigger_button {
+    fn press(
+        &mut self,
+        button: i64,
+        x: f64,
+        y: f64,
+        timestamp_ms: i64,
+        options: TriggerOptions,
+    ) -> Decision {
+        if button == options.trigger_button {
             return Decision::Trigger(TriggerSource::MouseMiddle);
         }
-        if event.button != 0 {
+        if button != 0 {
             return Decision::Ignored(Ignored::OtherButton);
         }
 
-        self.press = Some(Press {
-            x: event.x,
-            y: event.y,
-            timestamp_ms: event.timestamp_ms,
-        });
-        Decision::Quiet
+        // Recorded before the decision below, because a click that dismisses
+        // something can still be the start of a selection drag.
+        self.press = Some(Press { x, y, timestamp_ms });
+
+        Decision::Dismiss(DismissReason::Clicked)
     }
 
-    fn release(&mut self, event: PointerEvent, options: TriggerOptions) -> Decision {
-        if event.button != 0 {
+    fn release(
+        &mut self,
+        button: i64,
+        x: f64,
+        y: f64,
+        timestamp_ms: i64,
+        options: TriggerOptions,
+    ) -> Decision {
+        if button != 0 {
             return Decision::Quiet;
         }
 
@@ -164,17 +252,16 @@ impl TriggerReducer {
         };
 
         let click = Click {
-            x: event.x,
-            y: event.y,
-            timestamp_ms: event.timestamp_ms,
+            x,
+            y,
+            timestamp_ms,
         };
         // Whether the pointer moved at all decides whether this was a click.
         // Duration only decides whether a *drag* was deliberate, so a flick is
         // not a drag but is still not a click either.
-        let travelled = distance(press.x, press.y, event.x, event.y);
+        let travelled = distance(press.x, press.y, x, y);
         let moved = travelled >= SELECTION_DRAG_MIN_DISTANCE_PX;
-        let is_drag =
-            moved && event.timestamp_ms - press.timestamp_ms >= SELECTION_DRAG_MIN_DURATION_MS;
+        let is_drag = moved && timestamp_ms - press.timestamp_ms >= SELECTION_DRAG_MIN_DURATION_MS;
 
         let is_double_click = !moved && self.is_double_click(&click);
         // Recorded after the check, or the click would be compared with itself.
@@ -192,12 +279,12 @@ impl TriggerReducer {
         }
 
         if let Some(last) = self.last_selection_trigger_at {
-            if event.timestamp_ms - last < SELECTION_TRIGGER_COOLDOWN_MS {
+            if timestamp_ms - last < SELECTION_TRIGGER_COOLDOWN_MS {
                 return Decision::Ignored(Ignored::Cooldown);
             }
         }
 
-        self.last_selection_trigger_at = Some(event.timestamp_ms);
+        self.last_selection_trigger_at = Some(timestamp_ms);
         Decision::Trigger(TriggerSource::MouseSelection)
     }
 
@@ -230,8 +317,8 @@ mod tests {
     }
 
     fn down(button: i64, x: f64, y: f64, timestamp_ms: i64) -> PointerEvent {
-        PointerEvent {
-            kind: PointerEventKind::ButtonDown,
+        PointerEvent::Button {
+            kind: ButtonEvent::Down,
             button,
             x,
             y,
@@ -240,8 +327,8 @@ mod tests {
     }
 
     fn up(x: f64, y: f64, timestamp_ms: i64) -> PointerEvent {
-        PointerEvent {
-            kind: PointerEventKind::ButtonUp,
+        PointerEvent::Button {
+            kind: ButtonEvent::Up,
             button: 0,
             x,
             y,
@@ -249,11 +336,30 @@ mod tests {
         }
     }
 
+    fn scroll(delta: f64) -> PointerEvent {
+        PointerEvent::Scroll {
+            delta,
+            timestamp_ms: 0,
+        }
+    }
+
     /// A press and release in one call, which is what most of these tests are
     /// actually about.
     fn click(reducer: &mut TriggerReducer, x: f64, y: f64, timestamp_ms: i64) -> Decision {
-        reducer.reduce(down(0, x, y, timestamp_ms), options());
-        reducer.reduce(up(x, y, timestamp_ms + 30), options())
+        click_with(reducer, x, y, timestamp_ms, options())
+    }
+
+    fn click_with(
+        reducer: &mut TriggerReducer,
+        x: f64,
+        y: f64,
+        timestamp_ms: i64,
+        options: TriggerOptions,
+    ) -> Decision {
+        // A press on the left button always reports a click now, so it is the
+        // release that these tests are asking about.
+        reducer.reduce(down(0, x, y, timestamp_ms), options);
+        reducer.reduce(up(x, y, timestamp_ms + 30), options)
     }
 
     fn drag(
@@ -265,6 +371,61 @@ mod tests {
     ) -> Decision {
         reducer.reduce(down(0, from.0, from.1, start_ms), options());
         reducer.reduce(up(to.0, to.1, start_ms + duration_ms), options())
+    }
+
+    /// A press on the left button is also when the panel is told the user has
+    /// gone elsewhere, so tests about clicks have to check both events.
+    #[test]
+    fn a_left_press_reports_a_click() {
+        let mut reducer = TriggerReducer::default();
+
+        assert_eq!(
+            reducer.reduce(down(0, 10.0, 10.0, 1_000), options()),
+            Decision::Dismiss(DismissReason::Clicked)
+        );
+    }
+
+    /// Turning the wheel is the other way the user says they have moved on.
+    #[test]
+    fn a_scroll_past_the_threshold_reports_a_scroll() {
+        let mut reducer = TriggerReducer::default();
+
+        assert_eq!(
+            reducer.reduce(scroll(-200.0), options()),
+            Decision::Dismiss(DismissReason::Scrolled)
+        );
+        assert_eq!(
+            reducer.reduce(scroll(200.0), options()),
+            Decision::Dismiss(DismissReason::Scrolled)
+        );
+    }
+
+    /// A trackpad emits scroll events for the faintest touch, and dismissing on
+    /// those would take the point away when someone brushed the surface on their
+    /// way to the keyboard.
+    #[test]
+    fn a_small_scroll_is_not_the_user_moving_on() {
+        let mut reducer = TriggerReducer::default();
+
+        assert_eq!(reducer.reduce(scroll(-4.0), options()), Decision::Quiet);
+        assert_eq!(
+            reducer.reduce(scroll(SCROLL_DISMISS_PX - 1.0), options()),
+            Decision::Quiet
+        );
+    }
+
+    /// A scroll says nothing about the middle button, and must not be mistaken
+    /// for one.
+    #[test]
+    fn a_scroll_does_not_disturb_the_trigger_button() {
+        let mut reducer = TriggerReducer::default();
+
+        reducer.reduce(scroll(-500.0), options());
+
+        assert_eq!(
+            reducer.reduce(down(TRIGGER_BUTTON, 100.0, 100.0, 1_000), options()),
+            Decision::Trigger(TriggerSource::MouseMiddle)
+        );
     }
 
     #[test]
@@ -435,6 +596,7 @@ mod tests {
 
         reducer.reduce(down(0, 0.0, 0.0, 1_000), options());
         reducer.reduce(down(0, 500.0, 500.0, 1_100), options());
+
 
         assert_eq!(
             reducer.reduce(up(500.0, 500.0, 1_200), options()),

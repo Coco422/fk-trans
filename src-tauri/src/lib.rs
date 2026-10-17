@@ -304,6 +304,47 @@ pub(crate) fn dismiss_panel(app: &tauri::AppHandle) {
     apply_panel(app, transition);
 }
 
+/// Hide the trigger point because of something the user did in another app.
+///
+/// The position is what keeps a click *on* the point from being read as a click
+/// away from it: the tap sees that click first, and would otherwise take the
+/// point down a moment before the panel's own click handler could open it.
+fn dismiss_panel_at(
+    app: &tauri::AppHandle,
+    reason: trigger::reducer::DismissReason,
+    position: Option<(f64, f64)>,
+) {
+    let at = position.map(|(x, y)| Point { x, y });
+
+    let transition = {
+        let state = app.state::<AppState>();
+        let mut panel = state
+            .trigger_panel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        panel.dismiss_point(at)
+    };
+
+    // Either nothing was showing, or the click was meant for the panel itself.
+    // The snapshot goes out either way: the diagnostics panel is showing what the
+    // tap saw, and this event is part of that whether or not it changed anything.
+    if transition == trigger::panel::Transition::None {
+        emit_mouse_trigger_state(app);
+        return;
+    }
+
+    log::info!("[panel] Dismissed the trigger point: {}", reason.describe());
+    apply_panel(app, transition);
+
+    let state = app.state::<AppState>();
+    mouse::listener::mark_pipeline_result(
+        &state.mouse_trigger_state,
+        format!("Dismissed: {}", reason.describe()),
+        None,
+    );
+    emit_mouse_trigger_state(app);
+}
+
 fn show_popup_error(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, message: String) {
     show_translation_card(app, cursor);
     let _ = app.emit("translation-error", message);
@@ -679,20 +720,29 @@ pub fn run() {
                 match rx.recv() {
                     Ok(event) => {
                         log::info!(
-                            "[mouse] Event delivered to pipeline receiver: button={} trigger={:?} ts={}",
-                            event.button,
-                            event.trigger,
+                            "[mouse] Event delivered: {:?} position={:?} ts={}",
+                            event.decision,
+                            event.position,
                             event.timestamp_ms
                         );
                         let app = app_handle_clone.clone();
-                        emit_mouse_trigger_state(&app);
 
-                        let Some(source) = event.trigger else {
-                            continue;
-                        };
-                        let cm = clipboard_clone.clone();
-                        let gate = mouse_pipeline_gate.clone();
-                        tauri::async_runtime::spawn(run_translation_pipeline(app, cm, gate, source));
+                        match event.decision {
+                            trigger::reducer::Decision::Trigger(source) => {
+                                let cm = clipboard_clone.clone();
+                                let gate = mouse_pipeline_gate.clone();
+                                tauri::async_runtime::spawn(run_translation_pipeline(
+                                    app, cm, gate, source,
+                                ));
+                            }
+                            trigger::reducer::Decision::Dismiss(reason) => {
+                                dismiss_panel_at(&app, reason, event.position);
+                            }
+                            trigger::reducer::Decision::Quiet
+                            | trigger::reducer::Decision::Ignored(_) => {
+                                emit_mouse_trigger_state(&app);
+                            }
+                        }
                     }
                     Err(e) => {
                         log::error!("Channel error: {}", e);

@@ -56,6 +56,20 @@ pub struct Placement {
     pub size: Size,
 }
 
+impl Placement {
+    /// Whether a point falls inside the frame, in the same screen coordinates.
+    ///
+    /// The event tap reports positions in exactly these points, so this is what
+    /// tells a click on the trigger point apart from a click on the app behind
+    /// it.
+    pub fn contains(&self, at: Point) -> bool {
+        at.x >= self.origin.x
+            && at.x <= self.origin.x + self.size.width
+            && at.y >= self.origin.y
+            && at.y <= self.origin.y + self.size.height
+    }
+}
+
 /// What the caller should do to the window.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Transition {
@@ -238,13 +252,21 @@ impl Panel {
         Transition::Hide
     }
 
-    /// Hide if the point is what is showing.
+    /// Hide the point because the user did something else.
     ///
-    /// What a scroll or a click somewhere else means. Deliberately does *not*
-    /// apply to the card: that is a translation the user asked for and is
-    /// reading, and a stray scroll in the app behind it must not take it away.
-    pub fn dismiss_point(&mut self) -> Transition {
+    /// `at` is where the pointer was, for a click. A click *on* the point is the
+    /// click that opens it, so it must not close it in the same breath — and the
+    /// tap sees that click too, just before the panel does. A scroll has no such
+    /// case and passes `None`.
+    ///
+    /// Deliberately does *not* apply to the card: that is a translation the user
+    /// asked for and is reading, and a stray scroll in the app behind it must not
+    /// take it away.
+    pub fn dismiss_point(&mut self, at: Option<Point>) -> Transition {
         if self.phase != Phase::Point {
+            return Transition::None;
+        }
+        if at.is_some_and(|point| self.placement().contains(point)) {
             return Transition::None;
         }
         self.hide()
@@ -486,9 +508,13 @@ mod tests {
     fn a_point_is_dismissed_by_activity_elsewhere() {
         let mut panel = pointed();
 
-        assert_eq!(panel.dismiss_point(), Transition::Hide);
+        assert_eq!(panel.dismiss_point(Some(pointer_at(900.0, 900.0))), Transition::Hide);
         assert_eq!(panel.phase(), Phase::Hidden);
-        assert_eq!(panel.dismiss_point(), Transition::None, "already hidden");
+        assert_eq!(
+            panel.dismiss_point(Some(pointer_at(900.0, 900.0))),
+            Transition::None,
+            "already hidden"
+        );
     }
 
     /// But not the card: that is a translation the user asked for and is reading.
@@ -497,7 +523,7 @@ mod tests {
         let mut panel = pointed();
         panel.expand();
 
-        assert_eq!(panel.dismiss_point(), Transition::None);
+        assert_eq!(panel.dismiss_point(Some(pointer_at(0.0, 0.0))), Transition::None);
         assert_eq!(panel.phase(), Phase::Expanded);
     }
 
@@ -583,6 +609,45 @@ mod tests {
 
         panel.hide();
         assert_eq!(panel.selection(), None);
+    }
+
+    /// A click on the point is the click that opens it. The tap sees that click
+    /// first, so reading it as a click away from the point would take the point
+    /// down a moment before anything could open it.
+    #[test]
+    fn a_click_on_the_point_does_not_dismiss_it() {
+        let mut panel = pointed();
+        let placement = panel.placement();
+        let centre = Point {
+            x: placement.origin.x + placement.size.width / 2.0,
+            y: placement.origin.y + placement.size.height / 2.0,
+        };
+
+        assert_eq!(panel.dismiss_point(Some(centre)), Transition::None);
+        assert_eq!(panel.phase(), Phase::Point);
+        assert!(panel.expand().is_some(), "the point is still there to click");
+    }
+
+    #[test]
+    fn a_click_just_outside_the_point_dismisses_it() {
+        let mut panel = pointed();
+        let origin = panel.placement().origin;
+
+        assert_eq!(
+            panel.dismiss_point(Some(Point {
+                x: origin.x - 1.0,
+                y: origin.y,
+            })),
+            Transition::Hide
+        );
+    }
+
+    /// A scroll has no position to be inside of: it dismisses the point wherever
+    /// the pointer happens to be.
+    #[test]
+    fn a_scroll_dismisses_the_point_from_anywhere() {
+        let mut panel = pointed();
+        assert_eq!(panel.dismiss_point(None), Transition::Hide);
     }
 
     /// The gaps and margins all take space away from the card, which is the

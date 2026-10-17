@@ -12,7 +12,7 @@
 //! quiet.
 
 use crate::trigger::reducer::{
-    Decision, Ignored, PointerEvent, PointerEventKind, TriggerOptions, TriggerReducer,
+    ButtonEvent, Decision, Ignored, PointerEvent, TriggerOptions, TriggerReducer,
 };
 use core_graphics::event::{CGEvent, CGEventType, EventField};
 use serde::{Deserialize, Serialize};
@@ -70,16 +70,18 @@ pub struct MouseTriggerState {
     pub test_active_until: Option<i64>,
 }
 
-/// A mouse event the tap saw, on its way to the pipeline.
+/// A mouse event the tap saw, and what the reducer made of it.
 ///
-/// Sent for every event the tap subscribes to, not only the triggering ones, so
-/// the diagnostics panel keeps up with what the listener is actually seeing.
-/// `trigger` is `None` for an event that was observed and declined.
+/// Sent for everything the tap concludes something about, not only the events
+/// that start a translation, so the diagnostics panel keeps up with what the
+/// listener is actually seeing. Plain scrolls are the exception: there are
+/// hundreds of them a second and almost none of them mean anything.
 #[derive(Debug, Clone)]
 pub struct MouseTriggerEvent {
-    pub button: i64,
     pub timestamp_ms: i64,
-    pub trigger: Option<TriggerSource>,
+    /// Where the pointer was, for the events that happen at a place.
+    pub position: Option<(f64, f64)>,
+    pub decision: Decision,
 }
 
 pub struct MouseListener {
@@ -214,27 +216,47 @@ impl Drop for MouseListener {
 
 /// Turn a tap event into the plain description the reducer works on.
 ///
-/// The tap subscribes to exactly the three event types handled below, so anything
-/// else cannot arrive.
+/// The tap subscribes to exactly the event types handled below, so anything else
+/// cannot arrive.
 fn pointer_event(event_type: CGEventType, event: &CGEvent) -> Option<PointerEvent> {
-    let (kind, button) = match event_type {
-        CGEventType::OtherMouseDown => (
-            PointerEventKind::ButtonDown,
-            event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER),
-        ),
-        CGEventType::LeftMouseDown => (PointerEventKind::ButtonDown, 0),
-        CGEventType::LeftMouseUp => (PointerEventKind::ButtonUp, 0),
-        _ => return None,
-    };
-
+    let timestamp_ms = now_millis();
     let location = event.location();
-    Some(PointerEvent {
+    let button = |kind, button| PointerEvent::Button {
         kind,
         button,
         x: location.x,
         y: location.y,
-        timestamp_ms: now_millis(),
-    })
+        timestamp_ms,
+    };
+
+    match event_type {
+        CGEventType::OtherMouseDown => Some(button(
+            ButtonEvent::Down,
+            event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER),
+        )),
+        CGEventType::LeftMouseDown => Some(button(ButtonEvent::Down, 0)),
+        CGEventType::LeftMouseUp => Some(button(ButtonEvent::Up, 0)),
+        CGEventType::ScrollWheel => {
+            let vertical =
+                event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1);
+            let horizontal =
+                event.get_integer_value_field(EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2);
+
+            // Whichever axis moved more. A sideways scroll means the same thing
+            // as a vertical one here.
+            let delta = if vertical.abs() >= horizontal.abs() {
+                vertical
+            } else {
+                horizontal
+            };
+
+            Some(PointerEvent::Scroll {
+                delta: delta as f64,
+                timestamp_ms,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Whether a declined gesture belongs in the diagnostics panel.
@@ -322,6 +344,7 @@ fn start_platform_listener(
                     CGEventType::OtherMouseDown,
                     CGEventType::LeftMouseDown,
                     CGEventType::LeftMouseUp,
+                    CGEventType::ScrollWheel,
                 ],
                 move |_proxy, event_type, event| {
                     if matches!(
@@ -363,53 +386,72 @@ fn start_platform_listener(
                         reducer.reduce(pointer, options)
                     };
 
+                    // Scrolling is continuous and almost never has anything to do
+                    // with us. Taking the state lock and sending a message per
+                    // wheel notch would be a lot of work to decide nothing.
+                    //
+                    // Only scrolls: a click that decides nothing still says the
+                    // tap is alive and what it saw.
+                    if matches!(pointer, PointerEvent::Scroll { .. })
+                        && decision == Decision::Quiet
+                    {
+                        return None;
+                    }
+
+                    let button = match pointer {
+                        PointerEvent::Button { button, .. } => Some(button),
+                        PointerEvent::Scroll { .. } => None,
+                    };
+
                     {
                         let mut guard = lock(&callback_state);
                         guard.status = MouseTriggerStatus::EventReceived;
                         guard.accessibility_trusted = true;
-                        guard.last_button = Some(pointer.button);
-                        guard.last_event_at = Some(pointer.timestamp_ms);
+                        guard.last_event_at = Some(pointer.timestamp_ms());
                         guard.last_error = None;
+                        if button.is_some() {
+                            guard.last_button = button;
+                        }
 
                         let testing = guard
                             .test_active_until
-                            .is_some_and(|until| until > pointer.timestamp_ms);
+                            .is_some_and(|until| until > pointer.timestamp_ms());
 
                         match decision {
                             Decision::Trigger(source) => {
-                                guard.last_trigger_at = Some(pointer.timestamp_ms);
-                                guard.last_pipeline_result =
-                                    Some(describe_trigger(source, pointer.button));
+                                guard.last_trigger_at = Some(pointer.timestamp_ms());
+                                guard.last_pipeline_result = Some(describe_trigger(
+                                    source,
+                                    button.unwrap_or_default(),
+                                ));
                             }
                             Decision::Ignored(Ignored::OtherButton) if testing => {
                                 guard.last_pipeline_result = Some(format!(
                                     "Received button {}, configured trigger is {}",
-                                    pointer.button, guard.trigger_button
+                                    button.unwrap_or_default(),
+                                    guard.trigger_button
                                 ));
                             }
                             Decision::Ignored(reason) if is_worth_reporting(reason) => {
                                 guard.last_pipeline_result =
                                     Some(format!("Ignored: {}", reason.describe()));
                             }
+                            // Whether a dismissal applies is the panel's to say,
+                            // so nothing is written here; the receiver writes the
+                            // outcome once it knows.
+                            Decision::Dismiss(_) => {}
                             Decision::Quiet | Decision::Ignored(_) => {}
                         }
                     }
 
-                    let trigger = match decision {
-                        Decision::Trigger(source) => Some(source),
-                        _ => None,
-                    };
-                    if let Some(source) = trigger {
-                        log::info!(
-                            "[mouse] Trigger: source={:?} button={}",
-                            source,
-                            pointer.button
-                        );
+                    if let Decision::Trigger(source) = decision {
+                        log::info!("[mouse] Trigger: source={source:?} button={button:?}");
                     }
+
                     let _ = callback_tx.send(MouseTriggerEvent {
-                        button: pointer.button,
-                        timestamp_ms: pointer.timestamp_ms,
-                        trigger,
+                        timestamp_ms: pointer.timestamp_ms(),
+                        position: pointer.position(),
+                        decision,
                     });
                     None
                 },
