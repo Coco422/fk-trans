@@ -1,9 +1,10 @@
 /* @refresh reload */
 import { render } from "solid-js/web";
 import App from "./App";
-import FloatingPopup from "./components/FloatingPopup";
 import { logFrontendEvent } from "./api/commands";
+import FloatingPopup from "./components/FloatingPopup";
 import "./styles/globals.css";
+import { startTheme } from "./theme";
 
 function report(
   level: "error" | "warn" | "info",
@@ -39,6 +40,9 @@ window.addEventListener("unhandledrejection", (event) => {
  * dependency, used for a single two-way branch, in a window that never
  * navigates anywhere.
  */
+const stopTheme = startTheme();
+window.addEventListener("beforeunload", stopTheme, { once: true });
+
 function isPopupWindow(): boolean {
   return window.location.pathname.startsWith("/popup");
 }

@@ -10,19 +10,21 @@
     "serve": "vite preview",
     "gen:types": "cd src-tauri && TS_RS_EXPORT_DIR=../src/api cargo test --offline --lib -- export_bindings",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run build -- --mode development",
+    "check": "biome check src && npm run typecheck && npm run build -- --mode development",
     "tauri": "tauri",
-    "release:mac": "scripts/release-mac.sh"
+    "release:mac": "scripts/release-mac.sh",
+    "lint": "biome check src",
+    "lint:fix": "biome check --write src"
   },
   "license": "MIT",
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "solid-js": "^1.9.3"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.15",
     "@tailwindcss/vite": "^4.3.0",
     "@tauri-apps/cli": "^2",
     "tailwindcss": "^4.3.0",

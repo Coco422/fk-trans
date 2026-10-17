@@ -57,6 +57,20 @@ export type ExportedDiagnostics = { path: string, };
 export type HistoryEntry = { id: string, timestamp: number, original: string, translated: string, sourceLang: string, targetLang: string, provider: string, };
 
 /**
+ * One language the settings UI offers.
+ *
+ * Built from the same table the prompts use, so a language added there shows up
+ * in the UI without anyone having to remember to add it in two places — which
+ * is how the frontend and the backend came to disagree about them before.
+ */
+export type LanguageOption = { code: string, 
+/**
+ * The English name. The UI shows its own label where it has one, and falls
+ * back to this.
+ */
+name: string, };
+
+/**
  * Timestamps are milliseconds since the epoch. They cross IPC as plain JSON
  * numbers (`#[ts(type = "number")]`) rather than ts-rs's default `bigint`, which
  * the frontend would never see and could not compare against.

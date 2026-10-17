@@ -623,10 +623,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             install_panic_hook();
 
@@ -785,6 +782,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::translation::translate_text,
             commands::translation::ai_action,
+            commands::translation::get_languages,
             commands::translation::get_history,
             commands::translation::clear_history,
             commands::settings::get_config,

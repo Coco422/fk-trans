@@ -18,7 +18,7 @@ export default function TriggerDot(props: { onActivate: () => void }) {
       type="button"
       aria-label="翻译选中的文字"
       title="翻译选中的文字"
-      class="w-[22px] h-[22px] grid place-items-center rounded-full border border-gray-300/80 bg-white/95 text-gray-500 shadow-sm cursor-pointer transition-transform duration-150 ease-out hover:scale-110 hover:border-blue-400 hover:text-blue-500 dark:border-gray-600/80 dark:bg-gray-900/95 dark:text-gray-400 dark:hover:border-blue-500 dark:hover:text-blue-400"
+      class="w-[22px] h-[22px] grid place-items-center rounded-full border border-line bg-surface/95 text-muted shadow-sm cursor-pointer transition-transform duration-150 ease-out hover:scale-110 hover:border-accent hover:text-accent"
       classList={{ "scale-110": hovered() }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}

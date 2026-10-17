@@ -17,6 +17,7 @@ import type {
   DiagnosticsSnapshot,
   ExportedDiagnostics,
   HistoryEntry,
+  LanguageOption,
   MouseTriggerState,
   ProviderUpdate,
   TranslateResult,
@@ -54,10 +55,7 @@ function describe(error: unknown): string {
   return String(error);
 }
 
-async function call<T>(
-  command: string,
-  args?: Record<string, unknown>
-): Promise<T> {
+async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return await invoke<T>(command, args);
   } catch (error) {
@@ -105,6 +103,17 @@ export function translateText(args: {
   to: string;
 }): Promise<TranslateResult> {
   return call<TranslateResult>("translate_text", args);
+}
+
+/**
+ * The languages the settings UI offers.
+ *
+ * Listed from the same table Rust builds prompts from, so a language added there
+ * cannot go missing from the UI, and the two cannot disagree about which codes
+ * exist.
+ */
+export function getLanguages(): Promise<LanguageOption[]> {
+  return call<LanguageOption[]>("get_languages");
 }
 
 export function getHistory(): Promise<HistoryEntry[]> {

@@ -1,14 +1,14 @@
-import { createSignal, onMount, onCleanup, Show, For } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
-import TriggerDot from "./TriggerDot";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
   aiAction,
   dismissTriggerPanel,
   expandTriggerPanel,
   resizeTriggerPanel,
-  writeClipboard,
   type TranslationReadyPayload,
+  writeClipboard,
 } from "../api/commands";
+import TriggerDot from "./TriggerDot";
 
 /** Extra things the user can ask for about the selected text. */
 const ACTIONS = [
@@ -226,16 +226,22 @@ export default function FloatingPopup() {
   return (
     // No padding: the window is sized to this content exactly, and the placement
     // maths in Rust assumes the window *is* the box.
-    <div ref={content} class="w-full">
+    <div ref={content} class="popup-root w-full">
       <Show when={mode() === "point"}>
         <TriggerDot onActivate={activate} />
       </Show>
 
       <Show when={mode() === "card"}>
         <Show when={error()}>
-          <div class="w-[380px] rounded-xl border border-red-500/20 bg-white/95 p-4 shadow-sm backdrop-blur-md dark:bg-gray-900/95">
-            <div class="mb-2 flex items-center gap-2 text-red-500">
-              <svg class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div class="w-[380px] rounded-xl border border-danger/25 bg-surface/95 p-4 shadow-sm backdrop-blur-md">
+            <div class="mb-2 flex items-center gap-2 text-danger">
+              <svg
+                class="h-4 w-4 shrink-0"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                aria-hidden="true"
+              >
                 <path
                   stroke-linecap="round"
                   stroke-linejoin="round"
@@ -248,72 +254,73 @@ export default function FloatingPopup() {
                 <CloseButton onClick={dismiss} />
               </div>
             </div>
-            <p class="text-xs text-gray-600 dark:text-gray-400">{error()}</p>
+            <p class="text-xs text-muted">{error()}</p>
           </div>
         </Show>
 
         <Show when={loading() && !data() && !error()}>
-          <div class="w-[380px] rounded-xl bg-white/95 p-4 shadow-sm backdrop-blur-md dark:bg-gray-900/95">
+          <div class="w-[380px] rounded-xl bg-surface/95 p-4 shadow-sm backdrop-blur-md">
             <div class="mb-3 flex items-center gap-3">
               <div class="relative h-5 w-5">
-                <div class="absolute inset-0 rounded-full border-2 border-blue-200 dark:border-blue-800" />
-                <div class="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-blue-500" />
+                <div class="absolute inset-0 rounded-full border-2 border-accent/25" />
+                <div class="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-accent" />
               </div>
-              <span class="text-sm font-medium text-gray-700 dark:text-gray-300">翻译中…</span>
+              <span class="text-sm font-medium text-ink">翻译中…</span>
               <div class="ml-auto">
                 <CloseButton onClick={dismiss} />
               </div>
             </div>
             <div class="space-y-2">
-              <div class="h-3 w-3/4 animate-pulse rounded bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 dark:from-gray-700 dark:via-gray-600 dark:to-gray-700" />
-              <div class="h-3 w-1/2 animate-pulse rounded bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 dark:from-gray-700 dark:via-gray-600 dark:to-gray-700" />
+              <div class="h-3 w-3/4 animate-pulse rounded bg-raised" />
+              <div class="h-3 w-1/2 animate-pulse rounded bg-raised" />
             </div>
           </div>
         </Show>
 
         <Show when={data()}>
           {(payload) => (
-            <div class="w-[380px] animate-result-in rounded-xl bg-white/95 p-4 shadow-sm backdrop-blur-md dark:bg-gray-900/95">
+            <div class="w-[380px] animate-result-in rounded-xl bg-surface/95 p-4 shadow-sm backdrop-blur-md">
               <div class="mb-2 flex items-center justify-between">
-                <div class="font-mono text-xs text-gray-500 dark:text-gray-400">
+                <div class="font-mono text-xs text-muted">
                   {payload().result.sourceLang} → {payload().result.targetLang}
                 </div>
                 <div class="flex items-center gap-2">
-                  <span class="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-400 dark:bg-gray-800 dark:text-gray-500">
+                  <span class="rounded bg-raised px-1.5 py-0.5 text-[10px] text-faint">
                     {payload().result.provider}
                   </span>
                   <Show when={loading()}>
-                    <div class="h-3 w-3 animate-spin rounded-full border border-gray-300 border-t-blue-500" />
+                    <div class="h-3 w-3 animate-spin rounded-full border border-line border-t-accent" />
                   </Show>
                   <CloseButton onClick={dismiss} />
                 </div>
               </div>
 
-              <div class="popup-scroll mb-3 max-h-20 overflow-y-auto border-b border-gray-200 pb-3 text-sm leading-relaxed text-gray-500 dark:border-gray-700 dark:text-gray-400">
+              <div class="popup-scroll mb-3 max-h-20 overflow-y-auto border-b border-line pb-3 text-sm leading-relaxed text-muted">
                 {payload().original}
               </div>
 
-              <div class="popup-scroll mb-2 max-h-48 overflow-y-auto whitespace-pre-wrap text-base leading-relaxed text-gray-900 dark:text-white">
+              <div class="popup-scroll mb-2 max-h-48 overflow-y-auto whitespace-pre-wrap text-base leading-relaxed text-ink">
                 {payload().result.translated}
               </div>
 
               <Show when={extraResult()}>
-                <div class="popup-scroll mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap border-t border-gray-200 pt-2 text-sm leading-relaxed text-gray-600 dark:border-gray-700 dark:text-gray-300">
+                <div class="popup-scroll mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap border-t border-line pt-2 text-sm leading-relaxed text-muted">
                   {extraResult()}
                 </div>
               </Show>
 
-              <div class="mt-3 flex gap-1.5 border-t border-gray-200 pt-3 dark:border-gray-700">
+              <div class="mt-3 flex gap-1.5 border-t border-line pt-3">
                 <For each={ACTIONS}>
                   {(action) => (
                     <button
-                      class="cursor-pointer rounded-lg bg-gray-100 px-2.5 py-1 text-xs transition-colors hover:bg-gray-200 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-gray-800 dark:hover:bg-gray-700"
+                      type="button"
+                      class="cursor-pointer rounded-lg bg-raised px-2.5 py-1 text-xs text-ink transition-colors hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
                       disabled={actionLoading() !== null}
                       onClick={() => handleAction(action.id)}
                     >
                       {actionLoading() === action.id ? (
                         <span class="inline-flex items-center gap-1">
-                          <span class="inline-block h-3 w-3 animate-spin rounded-full border border-gray-400 border-t-transparent" />
+                          <span class="inline-block h-3 w-3 animate-spin rounded-full border border-line border-t-transparent" />
                           {action.label}
                         </span>
                       ) : (
@@ -323,7 +330,8 @@ export default function FloatingPopup() {
                   )}
                 </For>
                 <button
-                  class="ml-auto cursor-pointer rounded-lg bg-blue-50 px-2.5 py-1 text-xs text-blue-600 transition-colors hover:bg-blue-100 dark:bg-blue-900/30 dark:text-blue-400 dark:hover:bg-blue-900/50"
+                  type="button"
+                  class="ml-auto cursor-pointer rounded-lg bg-accent-soft px-2.5 py-1 text-xs text-accent transition-colors hover:brightness-95"
                   onClick={() => handleCopy(payload().result.translated)}
                 >
                   {copied() ? "已复制" : "复制"}
@@ -341,7 +349,7 @@ function CloseButton(props: { onClick: () => void }) {
   return (
     <button
       type="button"
-      class="grid h-6 w-6 cursor-pointer place-items-center rounded-md text-gray-400 hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+      class="grid h-6 w-6 cursor-pointer place-items-center rounded-md text-faint hover:bg-raised hover:text-ink"
       aria-label="关闭"
       onClick={() => props.onClick()}
     >

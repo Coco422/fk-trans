@@ -95,3 +95,29 @@ mod tests {
         assert_eq!(error, "Unknown action: unknown");
     }
 }
+
+/// One language the settings UI offers.
+///
+/// Built from the same table the prompts use, so a language added there shows up
+/// in the UI without anyone having to remember to add it in two places — which
+/// is how the frontend and the backend came to disagree about them before.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
+pub struct LanguageOption {
+    pub code: String,
+    /// The English name. The UI shows its own label where it has one, and falls
+    /// back to this.
+    pub name: String,
+}
+
+#[tauri::command]
+pub fn get_languages() -> Vec<LanguageOption> {
+    crate::translate::language::LANGUAGES
+        .iter()
+        .map(|language| LanguageOption {
+            code: language.code.to_string(),
+            name: language.name.to_string(),
+        })
+        .collect()
+}
