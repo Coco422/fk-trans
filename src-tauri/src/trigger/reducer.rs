@@ -110,10 +110,10 @@ pub enum Ignored {
 impl Ignored {
     pub fn describe(self) -> &'static str {
         match self {
-            Self::OtherButton => "a different mouse button was clicked",
-            Self::PressNotSeen => "a mouse release arrived with no matching press",
-            Self::SelectionTriggerDisabled => "the selection trigger is switched off",
-            Self::Cooldown => "a selection was translated a moment ago",
+            Self::OtherButton => "按下的不是设定的触发键",
+            Self::PressNotSeen => "只收到松开，没收到对应的按下",
+            Self::SelectionTriggerDisabled => "划词触发是关闭的",
+            Self::Cooldown => "刚刚才触发过一次",
         }
     }
 }
@@ -132,8 +132,8 @@ pub enum DismissReason {
 impl DismissReason {
     pub fn describe(self) -> &'static str {
         match self {
-            Self::Clicked => "the user clicked elsewhere",
-            Self::Scrolled => "the view behind it scrolled",
+            Self::Clicked => "点到别处去了",
+            Self::Scrolled => "后面的页面滚动了",
         }
     }
 }
@@ -650,7 +650,7 @@ mod tests {
             let description = reason.describe();
             assert!(!description.is_empty());
             assert!(
-                !description.ends_with('.'),
+                !description.ends_with('。') && !description.ends_with('.'),
                 "these are used mid-sentence: {description}"
             );
         }

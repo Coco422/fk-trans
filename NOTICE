@@ -1,0 +1,33 @@
+# 第三方
+
+## 依赖
+
+fk-trans 以 MIT 许可发布。它链接的第三方 crate 全部是宽松许可（MIT / Apache-2.0），
+没有 GPL 或 AGPL 依赖。主要的几个：
+
+- [Tauri](https://github.com/tauri-apps/tauri) — Apache-2.0 OR MIT
+- [tauri-nspanel](https://github.com/ahkohd/tauri-nspanel) — MIT OR Apache-2.0。
+  把 Tauri 的 `NSWindow` 换成真正的 `NSPanel`。
+- [ts-rs](https://github.com/Aleph-Alpha/ts-rs) — MIT。从 Rust 结构体生成前端的 TypeScript 类型。
+- [accessibility-sys](https://github.com/accessibility-rs/accessibility) — MIT / Apache-2.0。
+  辅助功能接口的 FFI 绑定。
+- [core-graphics](https://github.com/servo/core-foundation-rs) — MIT OR Apache-2.0。CGEventTap。
+- [objc](https://github.com/SSheldon/rust-objc) — MIT。少量 AppKit 调用。
+
+完整的依赖清单和版本见 `src-tauri/Cargo.lock` 与 `package-lock.json`。
+
+## 同类实现与许可
+
+macOS 上的划词翻译有一批成熟实现，本项目的交互行为与它们的通行做法一致
+（触发点贴着选区、悬停只做反馈、点击才翻译；滚动 / 点到别处 / Esc / 超时收起；
+先问辅助功能接口，读不到再合成 ⌘C）。**没有从这些项目复制代码。**
+
+有两处需要留意，都是 GPL-3.0，与本项目的 MIT 许可不兼容，因此没有参考其代码：
+
+- [EasyDict](https://github.com/tisfeng/EasyDict) — GPL-3.0
+- [`selection`](https://crates.io/crates/selection)（[pot-app/Selection](https://github.com/pot-app/Selection)）— GPL-3.0-only。
+  同类实现里被引用得最多的一份，但许可上不能用于本项目。
+
+许可上兼容、可以参考的是：
+
+- [SelectedTextKit](https://github.com/tisfeng/SelectedTextKit) — MIT。

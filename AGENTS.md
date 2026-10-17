@@ -27,6 +27,31 @@ in sync, so prefer AppKit-native behaviour over portable-looking indirection.
 
 ## Architecture Notes
 
+- The trigger decision is a pure state machine in `trigger::reducer`. It takes
+  plain `PointerEvent`s and a clock as a parameter and returns what the event
+  meant; `mouse::listener` only converts tap events into that shape and applies
+  the answer. Never put a threshold or an ordering rule back into the CGEventTap
+  callback — it runs on a thread macOS kills if it is slow, and nothing in it can
+  be tested without a live session.
+- The reducer does not know whether the panel is on screen, and must not learn.
+  It reports *that* a click or a scroll happened; `trigger::panel` decides whether
+  that applies. Two things depend on this: the tap sees a click on the trigger
+  point before the panel's own handler does, and one place has to know what is
+  displayed.
+- `trigger::panel` is the panel's state machine as pure data — point or card,
+  where each goes, and the generation that stops a slow translation resurrecting
+  a panel the user has closed. `macos::panel` applies the `Transition` it
+  returns; nothing else touches the window.
+- `capture` owns the strategy chain: ask the Accessibility API first, fall back
+  to a synthesised `⌘C` only where that is right (`should_fall_back_to_pasteboard`
+  is an exhaustive match, so a new failure mode will not compile until it is
+  classified). The selection trigger passes `pasteboard_allowed = false` — it only
+  needs to know whether to offer a trigger point, and synthesising a copy for
+  that would take over the user's clipboard before they asked for anything.
+- `macos::panel` swizzles the popup window into a real `NSPanel`. This is not
+  cosmetic: a plain `NSWindow` activates the app when clicked (destroying the
+  selection being read) and has its first click swallowed by AppKit. If the
+  conversion fails the app still runs on a plain window, with a warning.
 - `pipeline::PipelineGate` is the single-flight gate for translation runs. It
   records when the current run started and lets a later trigger reclaim the gate
   after `DEFAULT_GATE_LIMIT`, so a wedged run cannot disable the app for good.
@@ -69,11 +94,26 @@ A response that parses but contains no translation is an error, never
 `.unwrap_or("")`. An empty success renders as a blank popup with nothing to act
 on.
 
+## Frontend
+
+- `src/api/types.ts` is the only hand-written-looking file that is not: it is
+  generated. Everything else is `src/store.ts` (shared state for the settings
+  window), `src/tabs/` (the four pages) and `src/ui/` (primitives).
+- Colour is declared once per theme in `src/styles/globals.css` and exposed to
+  Tailwind through `@theme inline`. Components use `bg-surface`, `text-muted`,
+  `border-line` and friends — there should be no `dark:` variant and no
+  `gray-500` in a component, because the theme is one class on `<html>` and the
+  variables underneath it.
+- The popup window and the settings window share an origin, so they share the
+  stored theme; the popup has no toggle of its own and follows whatever the
+  other one chose.
+- Biome owns formatting and linting. `src/api/types.ts` is excluded, so the
+  formatter cannot rewrite what ts-rs emits.
+
 ## Useful Checks
 
 ```sh
-npm run typecheck
-npm run build -- --mode development
+npm run check                      # Biome + tsc + vite build
 cd src-tauri && cargo check --offline && cargo test --offline
 ```
 

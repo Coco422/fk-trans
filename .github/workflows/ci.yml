@@ -70,6 +70,9 @@ jobs:
             exit 1
           fi
 
+      - name: Lint and format
+        run: npx biome ci src
+
       - name: Typecheck
         run: npm run typecheck
 

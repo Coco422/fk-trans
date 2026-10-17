@@ -1,24 +1,74 @@
 # fk-trans
 
-Middle-click driven desktop translation tool built with Tauri, Solid, and TypeScript.
+macOS 上的划词 / 中键翻译工具。选中一段文字，旁边出现一个小圆点，点一下就翻译；
+或者按中键、按 ⌘⇧T。翻译结果出现在光标附近的一个浮层里，不会打断你手上的事。
 
-## Development
+界面和提示都是中文，MIT 许可。
+
+## 功能
+
+- **划词触发** — 拖选或双击选中文字后，选区右下角出现一个小圆点（右边放不下时自动翻到左边）。
+  只有点击它才会翻译，悬停不消耗任何请求。滚动页面、点到别处、按 Esc，或者 4 秒不动，它都会自己消失。
+- **中键触发** — 在任何地方按鼠标中键，立即翻译当前选中的文字。
+- **快捷键** — ⌘⇧T，和上面一样。
+- **多家翻译服务** — DeepLX（本地）、Ollama（本地）、OpenAI 兼容接口、Gemini、Claude。
+  每家单独配置，可以随时切换，也可以在设置里逐个「测试」。
+- **翻译结果浮层** — 显示原文和译文，附带「解释 / 总结 / 润色 / 词典」四个额外动作，
+  以及一键复制译文。
+
+## 系统要求
+
+- macOS（Apple Silicon 和 Intel 都可以，发布的包是针对 arm64 构建的）
+- **辅助功能（Accessibility）权限** — 需要它才能读到别的应用里选中的文字，
+  以及在回退方案里模拟一次 ⌘C。没有这个权限，中键和划词都不会工作。
+  第一次启动时系统会弹窗，也可以在「诊断」页里点「打开系统设置」手动开启。
+  授权后**需要重启 fk-trans**。
+
+## 安装
+
+从 [Releases](../../releases) 下载 `.dmg`，把 fk-trans 拖进「应用程序」。
+
+应用没有签名也没有公证，第一次打开时 macOS 会拦下来。在「系统设置 → 隐私与安全性」里
+点「仍要打开」即可。
+
+## 使用
+
+启动后应用只在菜单栏出现，没有 Dock 图标。菜单栏图标点一下打开设置。
+
+| 想要什么 | 怎么做 |
+| --- | --- |
+| 翻译一段文字 | 选中它，点旁边的小圆点 |
+| 快速翻译 | 选中文字，按鼠标中键 |
+| 不用鼠标 | 选中文字，按 ⌘⇧T |
+| 换一家翻译服务 | 设置 →「通用」→「当前翻译服务」 |
+| 填 API Key / 改提示词 | 设置 →「翻译服务」 |
+| 触发了但没反应 | 设置 →「诊断」，「最后结果」一栏会说明卡在哪一层 |
+
+## 开发
 
 ```sh
 npm install
 npm run tauri dev
 ```
 
-## Release
-
-macOS Apple Silicon builds and updater artifacts are configured for personal releases.
+检查：
 
 ```sh
-npm run release:mac
+npm run check                      # Biome + 类型 + 前端构建
+cd src-tauri && cargo test --offline
 ```
 
-See [docs/release.md](docs/release.md) for GitHub Actions release and updater setup.
+前端类型由 Rust 结构体生成，不要手写：
 
-## Recommended IDE Setup
+```sh
+npm run gen:types                  # 等价于 cargo test -- export_bindings
+```
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+CI 会检查生成的 `src/api/types.ts` 是否与 Rust 一致。
+
+## 文档
+
+- [docs/architecture.md](docs/architecture.md) — 代码怎么分层，一次翻译经过哪些地方
+- [docs/local-models.md](docs/local-models.md) — 本地模型（Ollama）的推荐与实测
+- [docs/release.md](docs/release.md) — 打包发布流程
+- [NOTICE](NOTICE) — 第三方依赖与借鉴来源

@@ -137,22 +137,22 @@ pub fn snapshot(state: &SharedMouseTriggerState) -> MouseTriggerState {
 pub fn set_trigger_button(state: &SharedMouseTriggerState, button: i64) {
     let mut guard = lock(state);
     guard.trigger_button = button;
-    guard.last_pipeline_result = Some(format!("Trigger button set to {}", button));
+    guard.last_pipeline_result = Some(format!("触发键已设为 {}", button));
 }
 
 pub fn set_selection_trigger_enabled(state: &SharedMouseTriggerState, enabled: bool) {
     let mut guard = lock(state);
     guard.selection_trigger_enabled = enabled;
     guard.last_pipeline_result = Some(format!(
-        "Selection trigger {}",
-        if enabled { "enabled" } else { "disabled" }
+        "划词触发{}",
+        if enabled { "已开启" } else { "已关闭" }
     ));
 }
 
 pub fn start_test_window(state: &SharedMouseTriggerState, duration_ms: i64) -> MouseTriggerState {
     let mut guard = lock(state);
     guard.test_active_until = Some(now_millis() + duration_ms);
-    guard.last_pipeline_result = Some("Middle click test started".to_string());
+    guard.last_pipeline_result = Some("已开始检测鼠标按键".to_string());
     guard.clone()
 }
 
@@ -271,9 +271,9 @@ fn is_worth_reporting(reason: Ignored) -> bool {
 
 fn describe_trigger(source: TriggerSource, button: i64) -> String {
     match source {
-        TriggerSource::MouseMiddle => format!("Trigger button {} received", button),
-        TriggerSource::MouseSelection => "Selection gesture detected".to_string(),
-        TriggerSource::KeyboardShortcut | TriggerSource::Test => "Triggered".to_string(),
+        TriggerSource::MouseMiddle => format!("收到触发键 {}", button),
+        TriggerSource::MouseSelection => "检测到划词动作".to_string(),
+        TriggerSource::KeyboardShortcut | TriggerSource::Test => "已触发".to_string(),
     }
 }
 
@@ -427,14 +427,14 @@ fn start_platform_listener(
                             }
                             Decision::Ignored(Ignored::OtherButton) if testing => {
                                 guard.last_pipeline_result = Some(format!(
-                                    "Received button {}, configured trigger is {}",
+                                    "收到按键 {}，当前触发键是 {}",
                                     button.unwrap_or_default(),
                                     guard.trigger_button
                                 ));
                             }
                             Decision::Ignored(reason) if is_worth_reporting(reason) => {
                                 guard.last_pipeline_result =
-                                    Some(format!("Ignored: {}", reason.describe()));
+                                    Some(format!("已忽略：{}", reason.describe()));
                             }
                             // Whether a dismissal applies is the panel's to say,
                             // so nothing is written here; the receiver writes the

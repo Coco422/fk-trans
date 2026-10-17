@@ -125,10 +125,10 @@ impl ConfigPatch {
             config.selection_trigger_enabled = selection_trigger_enabled;
         }
         if let Some(lang) = &self.source_lang {
-            config.source_lang = require_language_code(lang, "Source language")?;
+            config.source_lang = require_language_code(lang, "源语言")?;
         }
         if let Some(lang) = &self.target_lang {
-            config.target_lang = require_language_code(lang, "Target language")?;
+            config.target_lang = require_language_code(lang, "目标语言")?;
         }
         if let Some(provider) = &self.active_provider {
             if !config
@@ -136,15 +136,15 @@ impl ConfigPatch {
                 .iter()
                 .any(|candidate| &candidate.name == provider)
             {
-                return Err(format!("Unknown provider: {provider}"));
+                return Err(format!("未知的翻译服务：{provider}"));
             }
             config.active_provider = provider.clone();
         }
         if let Some(button) = self.mouse_trigger_button {
             if !(MIN_TRIGGER_BUTTON..=MAX_TRIGGER_BUTTON).contains(&button) {
                 return Err(format!(
-                    "Trigger button must be between {MIN_TRIGGER_BUTTON} and {MAX_TRIGGER_BUTTON} \
-                     (0 is the left button); got {button}"
+                    "触发键必须在 {MIN_TRIGGER_BUTTON} 到 {MAX_TRIGGER_BUTTON} 之间\
+                     （0 是左键），现在是 {button}"
                 ));
             }
             config.mouse_trigger_button = button;
@@ -156,7 +156,7 @@ impl ConfigPatch {
 fn require_language_code(value: &str, field: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(format!("{field} cannot be empty"));
+        return Err(format!("{field}不能为空"));
     }
     Ok(trimmed.to_string())
 }
@@ -271,24 +271,24 @@ pub fn validate_provider(provider: &ProviderConfig) -> Result<(), String> {
 
     if !crate::translate::SUPPORTED_PROVIDERS.contains(&name) {
         return Err(format!(
-            "Unknown provider: {name} (supported: {})",
-            crate::translate::SUPPORTED_PROVIDERS.join(", ")
+            "未知的翻译服务：{name}（支持：{}）",
+            crate::translate::SUPPORTED_PROVIDERS.join("、")
         ));
     }
 
     if is_blank(&provider.base_url) {
-        return Err(format!("{name} base URL is not configured"));
+        return Err("还没填 Base URL".to_string());
     }
 
     // DeepLX translates on its own; every other provider needs a model.
     if name != "deeplx" && is_blank(&provider.model) {
-        return Err(format!("{name} model is not configured"));
+        return Err("还没填模型".to_string());
     }
 
     // A key is only required where one could actually be used. Pointing at a
     // remote endpoint without one is worth flagging before the user tries it.
     if !is_loopback_url(&provider.base_url) && is_blank(&provider.api_key) {
-        return Err(format!("{name} API key is not configured"));
+        return Err("还没填 API Key".to_string());
     }
 
     Ok(())
@@ -342,7 +342,7 @@ pub struct ConfigLoad {
 fn config_dir() -> Result<PathBuf, String> {
     dirs::config_dir()
         .map(|dir| dir.join("fk-trans"))
-        .ok_or_else(|| "Could not locate the user config directory".to_string())
+        .ok_or_else(|| "找不到用户配置目录".to_string())
 }
 
 pub fn config_path() -> Result<PathBuf, String> {
@@ -484,7 +484,7 @@ fn migrate_providers(config: &mut AppConfig, path: &Path) -> Vec<String> {
         }
         let updated = format!("{base}/v1");
         let notice = format!(
-            "Updated the Ollama base URL from '{base}' to '{updated}': Ollama is used through its OpenAI-compatible endpoint."
+            "已把 Ollama 的地址从 `{base}` 改成 `{updated}`：Ollama 走 OpenAI 兼容接口。"
         );
         log::info!("[config] {}: {}", path.display(), notice);
         provider.base_url = updated;
@@ -817,7 +817,7 @@ mod tests {
         };
 
         let error = validate_active_provider(&openai).expect_err("a key is required");
-        assert!(error.contains("API key"), "got: {error}");
+        assert!(error.contains("API Key"), "got: {error}");
     }
 
     #[test]
@@ -829,7 +829,7 @@ mod tests {
                 ..AppConfig::default()
             };
             let error = validate_active_provider(&no_model).expect_err("a model is required");
-            assert!(error.contains("model"), "{name} gave: {error}");
+            assert!(error.contains("模型"), "{name} gave: {error}");
         }
 
         let deeplx = AppConfig {
@@ -845,7 +845,7 @@ mod tests {
             ..AppConfig::default()
         };
         let error = validate_active_provider(&no_url).expect_err("a base URL is required");
-        assert!(error.contains("base URL"), "got: {error}");
+        assert!(error.contains("Base URL"), "got: {error}");
     }
 
     /// `custom_http` was removed. A config still naming it must be reported, not
@@ -859,7 +859,7 @@ mod tests {
         };
 
         let error = validate_active_provider(&config).expect_err("custom_http no longer exists");
-        assert!(error.contains("Unknown provider"), "got: {error}");
+        assert!(error.contains("未知的翻译服务"), "got: {error}");
         assert!(
             error.contains("openai") && error.contains("deeplx"),
             "the message should name what is supported: {error}"
@@ -1360,7 +1360,7 @@ mod tests {
             }
             .apply_to(&mut config)
             .expect_err("a blank language must be refused");
-            assert!(error.contains("Target language"), "got: {error}");
+            assert!(error.contains("目标语言"), "got: {error}");
         }
 
         /// A trigger button that no mouse produces used to be accepted and then
@@ -1377,7 +1377,7 @@ mod tests {
                 .apply_to(&mut config)
                 .expect_err("should be refused");
                 assert!(
-                    error.contains("Trigger button"),
+                    error.contains("触发键"),
                     "button {button} gave: {error}"
                 );
                 assert_eq!(config.mouse_trigger_button, 2, "config must be untouched");
@@ -1395,7 +1395,7 @@ mod tests {
             }
             .apply_to(&mut config)
             .expect_err("refused");
-            assert!(error.contains("left button"), "got: {error}");
+            assert!(error.contains("左键"), "got: {error}");
         }
 
         #[test]
@@ -1409,7 +1409,7 @@ mod tests {
             .apply_to(&mut config)
             .expect_err("refused");
 
-            assert!(error.contains("Unknown provider"), "got: {error}");
+            assert!(error.contains("未知的翻译服务"), "got: {error}");
             assert_eq!(config.active_provider, "openai", "unchanged");
         }
 

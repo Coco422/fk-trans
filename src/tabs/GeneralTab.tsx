@@ -2,6 +2,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
 import { createResource, createSignal, Show } from "solid-js";
 import * as api from "../api/commands";
+import { useAutostart } from "../autostart";
 import { describeError, store } from "../store";
 import type { Theme } from "../theme";
 import Button from "../ui/Button";
@@ -23,6 +24,7 @@ const busy = new Set(["checking", "downloading", "installed"]);
 export default function GeneralTab() {
   const [languages] = createResource(() => api.getLanguages());
   const [update, setUpdate] = createSignal<UpdateStatus>({ status: "idle" });
+  const autostart = useAutostart();
 
   /** The language list, with every code the config might hold accounted for. */
   function options() {
@@ -180,6 +182,20 @@ export default function GeneralTab() {
                 label="详细日志"
                 checked={cfg().debugLogging}
                 onChange={(debugLogging) => void store.saveConfig({ debugLogging })}
+              />
+            </Field>
+          </Section>
+
+          <Section title="启动">
+            <Field
+              label="登录时自动启动"
+              hint={autostart.error() ?? "开机后静默启动，只在菜单栏出现。"}
+            >
+              <Toggle
+                label="登录时自动启动"
+                checked={autostart.enabled()}
+                disabled={autostart.error() !== null}
+                onChange={(value) => void autostart.set(value)}
               />
             </Field>
           </Section>

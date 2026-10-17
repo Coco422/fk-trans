@@ -103,7 +103,7 @@ pub(crate) fn acquire_pipeline_gate(
         }),
         pipeline::GateOutcome::Reclaimed { token, held_for_ms } => {
             let note = format!(
-                "Recovered: previous pipeline run was wedged for {}s and was abandoned",
+                "已恢复：上一次翻译卡住了 {} 秒，已放弃",
                 held_for_ms / 1000
             );
             log::warn!("[pipeline] {}", note);
@@ -123,7 +123,7 @@ pub(crate) fn acquire_pipeline_gate(
             if let Some(state) = app.try_state::<AppState>() {
                 mouse::listener::mark_pipeline_result(
                     &state.mouse_trigger_state,
-                    "Skipped: previous pipeline still running",
+                    "已跳过：上一次翻译还在进行",
                     None,
                 );
             }
@@ -339,7 +339,7 @@ fn dismiss_panel_at(
     let state = app.state::<AppState>();
     mouse::listener::mark_pipeline_result(
         &state.mouse_trigger_state,
-        format!("Dismissed: {}", reason.describe()),
+        format!("已收起：{}", reason.describe()),
         None,
     );
     emit_mouse_trigger_state(app);
@@ -418,7 +418,7 @@ async fn run_translation_pipeline(
             log::info!("[pipeline] Disabled, skipping");
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
-                "Skipped: fk-trans disabled",
+                "已跳过：fk-trans 已关闭",
                 None,
             );
             emit_mouse_trigger_state(&app);
@@ -440,7 +440,7 @@ async fn run_translation_pipeline(
             let state = app.state::<AppState>();
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
-                "Skipped: selection trigger ignored because provider is not ready",
+                "已跳过：翻译服务未就绪，忽略划词触发",
                 Some(reason),
             );
             emit_mouse_trigger_state(&app);
@@ -450,12 +450,12 @@ async fn run_translation_pipeline(
         show_popup_error(
             &app,
             cursor_pos,
-            "No available translation provider. Configure one in Settings.".to_string(),
+            "没有可用的翻译服务，请到设置里配置一个。".to_string(),
         );
         let state = app.state::<AppState>();
         mouse::listener::mark_pipeline_result(
             &state.mouse_trigger_state,
-            "Failed: no available translation provider",
+            "失败：没有可用的翻译服务",
             Some(reason),
         );
         emit_mouse_trigger_state(&app);
@@ -489,17 +489,17 @@ async fn run_translation_pipeline(
         if is_selection_source {
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
-                "Ignored: selection drag produced no captured text",
+                "已忽略：划词没有取到文字",
                 Some(capture_note),
             );
         } else {
             let _ = app.emit(
                 "translation-error",
-                "No selected text captured. Select text in another app and try again.".to_string(),
+                "没有取到选中的文字，请先在别的应用里选中文字再试。".to_string(),
             );
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
-                "Failed: no selected text captured",
+                "失败：没有取到选中的文字",
                 Some(capture_note),
             );
         }
@@ -525,7 +525,7 @@ async fn run_translation_pipeline(
 
         mouse::listener::mark_pipeline_result(
             &state.mouse_trigger_state,
-            format!("Ready: {char_count} chars selected, waiting for the trigger point"),
+            format!("就绪：已选中 {char_count} 个字符，等待点击触发点"),
             None,
         );
         emit_mouse_trigger_state(&app);
@@ -561,9 +561,9 @@ pub(crate) async fn translate_and_show(
     match engine.translate(&text, &source_lang, &target_lang).await {
         Ok(result) => {
             let success_message = format!(
-                "Success: translated {} chars with {}",
-                text.chars().count(),
-                result.provider
+                "成功：用 {} 翻译了 {} 个字符",
+                result.provider,
+                text.chars().count()
             );
             state.history.add(history::HistoryEntry {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -594,7 +594,7 @@ pub(crate) async fn translate_and_show(
             let _ = app.emit("translation-error", error.to_string());
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
-                "Failed: translation error",
+                "失败：翻译出错",
                 Some(format!("Translation error kind: {}", error.kind())),
             );
             emit_mouse_trigger_state(app);
@@ -624,6 +624,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // LaunchAgent rather than an AppleScript login item: it survives a
+        // reboot without the user's session, and it is one plist the app can
+        // remove cleanly when the toggle is turned off.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             install_panic_hook();
 
@@ -799,8 +806,30 @@ pub fn run() {
             commands::trigger::resize_trigger_panel,
             commands::trigger::dismiss_trigger_panel,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .on_window_event(|window, event| {
+            // The settings window is the only one the user can close, and closing
+            // it must not take the app with it: fk-trans lives in the menu bar,
+            // and the tray is how it comes back. Hiding it also keeps the webview
+            // alive, so reopening is instant and the drafts survive.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Closing the last window is not quitting, for the same reason: a
+            // menu-bar app with no menu bar icon would be unreachable. An
+            // explicit exit — the tray's Quit — carries a code and still runs.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
 
 #[cfg(test)]
