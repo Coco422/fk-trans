@@ -29,13 +29,9 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, PhysicalPosition};
 use tokio::sync::RwLock;
 use translate::TranslationEngine;
-use trigger::placement::{self, Point, Size};
+use trigger::placement::Point;
 use trigger::TriggerSource;
 
-/// Distance between the popup and whatever it is anchored to.
-const POPUP_GAP: f64 = 10.0;
-/// The closest the popup may come to the edge of the usable screen area.
-const POPUP_SCREEN_MARGIN: f64 = 8.0;
 const LOG_MAX_FILE_SIZE_BYTES: u64 = 512 * 1024;
 const LOG_ROTATION_KEEP_FILES: usize = 4;
 
@@ -68,6 +64,12 @@ pub struct AppState {
     /// longer exists. Reported in Diagnostics so a migration is not mistaken for
     /// the app rewriting settings on its own.
     pub config_notices: Vec<String>,
+    /// The trigger point and the card it opens into.
+    pub trigger_panel: Mutex<trigger::panel::Panel>,
+    /// The popup window, once macOS has been asked to make it a panel. `None`
+    /// when that failed, in which case the popup still works but behaves like an
+    /// ordinary window: it activates the app when clicked.
+    pub panel_window: Mutex<Option<macos::panel::TriggerPanelWindow>>,
 }
 
 /// Releases the pipeline gate when the run ends, however it ends.
@@ -88,7 +90,7 @@ impl Drop for GateGuard {
 /// logged as a warning and surfaced in diagnostics, because it means a previous
 /// run wedged — the app recovered, but something upstream is broken and the user
 /// needs to be able to see that rather than just noticing odd behaviour.
-fn acquire_pipeline_gate(
+pub(crate) fn acquire_pipeline_gate(
     app: &tauri::AppHandle,
     gate: &Arc<pipeline::PipelineGate>,
 ) -> Option<GateGuard> {
@@ -150,27 +152,34 @@ fn current_cursor_position(app: &tauri::AppHandle) -> PhysicalPosition<f64> {
 /// Accessibility and Tauri both express logical positions in points, but Tauri
 /// reports the pointer in physical pixels, so the pointer has to be converted
 /// back before it can be used as a logical anchor.
-fn scale_factor_at(window: &tauri::WebviewWindow, cursor: PhysicalPosition<f64>) -> f64 {
-    window
-        .monitor_from_point(cursor.x, cursor.y)
-        .ok()
-        .flatten()
+fn scale_factor_at(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) -> f64 {
+    any_window(app)
+        .and_then(|window| window.monitor_from_point(cursor.x, cursor.y).ok().flatten())
         .map(|monitor| monitor.scale_factor())
         .unwrap_or(1.0)
 }
 
+/// Somewhere to ask the questions Tauri will only answer about a window —
+/// which display a point is on, and how it scales. Which window is asked does
+/// not matter, and neither does whether it is visible.
+fn any_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    app.get_webview_window("popup")
+        .or_else(|| app.get_webview_window("main"))
+}
+
 /// The usable area of the display the pointer is on, in logical points.
 ///
-/// Taken from the pointer rather than from the selection because a selection is
-/// always on the display the pointer that made it is on, and the pointer is the
-/// one Tauri can answer questions about in physical coordinates.
-fn work_area_at(window: &tauri::WebviewWindow, cursor: PhysicalPosition<f64>) -> Option<ScreenRect> {
-    let monitor = window
+/// Taken from the pointer rather than from the selection, because a selection is
+/// on the display the pointer that made it is on, and the pointer is the one
+/// Tauri can answer questions about in physical coordinates.
+fn work_area_at(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) -> Option<ScreenRect> {
+    let monitor = any_window(app)?
         .monitor_from_point(cursor.x, cursor.y)
         .ok()
         .flatten()?;
-    // Each half converts on its own: `PhysicalRect` has no conversion, because a
-    // position and a size do not scale the same way (`ceil` vs `floor`).
+
+    // Each half converts on its own: `PhysicalRect` has no conversion of its own,
+    // because a position and a size do not scale the same way (`ceil` vs `floor`).
     let area = monitor.work_area();
     let scale = monitor.scale_factor();
     let position = area.position.to_logical::<f64>(scale);
@@ -184,95 +193,119 @@ fn work_area_at(window: &tauri::WebviewWindow, cursor: PhysicalPosition<f64>) ->
     })
 }
 
-/// Where to put the popup, in logical points.
-///
-/// Anchored to the selection when the app reported its geometry, and to the
-/// pointer otherwise. Anchoring to the selection is the point of asking
-/// Accessibility for its rectangle at all: the popup opens beside the words being
-/// translated rather than beside wherever the pointer ended up.
-///
-/// A selection gets the same treatment a small box next to any selection gets —
-/// just outside its bottom-right corner, flipping to the other side when there is
-/// no room. The trigger point will land in exactly the same place, smaller.
-fn popup_origin(
-    window: &tauri::WebviewWindow,
-    cursor: PhysicalPosition<f64>,
-    bounds: Option<ScreenRect>,
-    popup: Size,
-) -> Point {
-    let cursor_point = || {
-        let logical = cursor.to_logical::<f64>(scale_factor_at(window, cursor));
-        Point {
-            x: logical.x,
-            y: logical.y,
-        }
-    };
-
-    let Some(work_area) = work_area_at(window, cursor) else {
-        // Nothing to clamp against. Roughly the right place beats not showing it.
-        let anchor = bounds.map_or_else(cursor_point, |rect| Point {
-            x: rect.right(),
-            y: rect.bottom(),
-        });
-        return Point {
-            x: anchor.x + POPUP_GAP,
-            y: anchor.y + POPUP_GAP,
-        };
-    };
-
-    match bounds {
-        Some(rect) => {
-            placement::trigger_point(rect, popup, work_area, POPUP_GAP, POPUP_SCREEN_MARGIN)
-        }
-        None => placement::panel_origin(
-            cursor_point(),
-            popup,
-            work_area,
-            POPUP_GAP,
-            POPUP_SCREEN_MARGIN,
-        ),
+fn pointer_in_points(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) -> Point {
+    let logical = cursor.to_logical::<f64>(scale_factor_at(app, cursor));
+    Point {
+        x: logical.x,
+        y: logical.y,
     }
 }
 
-fn popup_size(window: &tauri::WebviewWindow, scale: f64) -> Option<Size> {
-    let size = window.outer_size().ok()?.to_logical::<f64>(scale);
+/// Run a transition from the panel state machine against the real window.
+pub(crate) fn apply_panel(app: &tauri::AppHandle, transition: trigger::panel::Transition) {
+    let state = app.state::<AppState>();
+    let guard = state
+        .panel_window
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    Some(Size {
-        width: size.width,
-        height: size.height,
-    })
+    match guard.as_ref() {
+        Some(window) => window.apply(transition),
+        None => log::warn!("[panel] No panel window, dropping {transition:?}"),
+    }
 }
 
-fn show_popup(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, bounds: Option<ScreenRect>) {
-    let Some(window) = app.get_webview_window("popup") else {
-        log::warn!("[pipeline] No popup window to show");
-        return;
-    };
-    let scale = scale_factor_at(&window, cursor);
-    let Some(size) = popup_size(&window, scale) else {
-        log::warn!("[pipeline] Could not measure the popup window");
+/// Show the result card beside the pointer, with no point to click first.
+///
+/// What a middle click and the keyboard shortcut do: the user has already asked
+/// for a translation, so the card goes up immediately and the loading state is
+/// visible while it is fetched.
+fn show_translation_card(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
+    let Some(work_area) = work_area_at(app, cursor) else {
+        log::warn!("[panel] Could not read the display's work area");
         return;
     };
 
-    let origin = popup_origin(&window, cursor, bounds, size);
-    log::info!(
-        "[pipeline] Showing popup at ({:.0}, {:.0}), anchored to {}",
-        origin.x,
-        origin.y,
-        if bounds.is_some() {
-            "the selection"
-        } else {
-            "the cursor"
-        }
-    );
-    let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
-        origin.x, origin.y,
-    )));
-    let _ = window.show();
+    let pointer = pointer_in_points(app, cursor);
+    let now = mouse::listener::now_millis();
+
+    let transition = {
+        let state = app.state::<AppState>();
+        let mut panel = state
+            .trigger_panel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        panel.show_card(pointer, work_area, now)
+    };
+
+    apply_panel(app, transition);
+    let _ = app.emit("translation-started", ());
+}
+
+/// Show the trigger point for a selection, instead of translating it.
+///
+/// The point is the whole point: nothing is translated until it is clicked, so
+/// selecting text never costs a request, and a trackpad user — who has no middle
+/// button — has something to click.
+fn show_trigger_point(
+    app: &tauri::AppHandle,
+    cursor: PhysicalPosition<f64>,
+    bounds: Option<ScreenRect>,
+    text: String,
+) {
+    let Some(work_area) = work_area_at(app, cursor) else {
+        log::warn!("[panel] Could not read the display's work area");
+        return;
+    };
+
+    let pointer = pointer_in_points(app, cursor);
+    let now = mouse::listener::now_millis();
+
+    let transition = {
+        let state = app.state::<AppState>();
+        let mut panel = state
+            .trigger_panel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        panel.show_point(bounds, pointer, work_area, text, now)
+    };
+
+    apply_panel(app, transition);
+    let _ = app.emit("trigger-point", ());
+
+    // An unclicked point goes away on its own. The deadline is checked against
+    // the point's own age, so this timer cannot take down a card that has since
+    // replaced it.
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(trigger::panel::POINT_TTL).await;
+        let transition = {
+            let state = handle.state::<AppState>();
+            let mut panel = state
+                .trigger_panel
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            panel.expire_point(mouse::listener::now_millis())
+        };
+        apply_panel(&handle, transition);
+    });
+}
+
+/// Hide the trigger point or the card, whichever is showing.
+pub(crate) fn dismiss_panel(app: &tauri::AppHandle) {
+    let transition = {
+        let state = app.state::<AppState>();
+        let mut panel = state
+            .trigger_panel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        panel.hide()
+    };
+    apply_panel(app, transition);
 }
 
 fn show_popup_error(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, message: String) {
-    show_popup(app, cursor, None);
+    show_translation_card(app, cursor);
     let _ = app.emit("translation-error", message);
 }
 
@@ -315,7 +348,8 @@ async fn run_translation_pipeline(
 ) {
     let is_selection_source = source == TriggerSource::MouseSelection;
 
-    let _guard = match acquire_pipeline_gate(&app, &gate) {
+    // Held until the answer is on screen, or handed on to `translate_and_show`.
+    let guard = match acquire_pipeline_gate(&app, &gate) {
         Some(guard) => guard,
         None => {
             emit_mouse_trigger_state(&app);
@@ -391,17 +425,21 @@ async fn run_translation_pipeline(
         // An explicit trigger gets a visible loading state before the capture,
         // which can take a moment: without it a slow or failing capture is
         // indistinguishable from the app ignoring the click.
-        show_popup(&app, cursor_pos, None);
-        let _ = app.emit("translation-started", ());
+        show_translation_card(&app, cursor_pos);
     }
 
     // The strategy chain does its own waiting: it lets the app settle after the
     // mouse-up, bounds each attempt, and decides whether the pasteboard fallback
     // is worth trying. Reading a selection before the app has finished making it
     // is the main reason the old capture was unreliable.
+    //
+    // A selection trigger allows no pasteboard fallback: this run only decides
+    // whether to offer a trigger point, and synthesising Cmd+C to find that out
+    // would take over the user's clipboard for a translation they have not asked
+    // for yet. The fallback happens on the click, when they have.
     log::info!("[pipeline] Capturing selected text...");
     let state = app.state::<AppState>();
-    let capture = capture::capture_selection(&cm, true).await;
+    let capture = capture::capture_selection(&cm, !is_selection_source).await;
     let capture_note = capture.summary();
     log::info!("[pipeline] Capture: {capture_note}");
 
@@ -437,12 +475,38 @@ async fn run_translation_pipeline(
     );
 
     if is_selection_source {
-        // Deliberately after the capture, not before: only now do we know where
-        // the selection is, and a popup that appears at the pointer and then jumps
-        // is worse than one that appears in the right place.
-        show_popup(&app, cursor_pos, captured.bounds);
-        let _ = app.emit("translation-started", ());
+        // A selection shows a trigger point and stops. Deliberately after the
+        // capture, not before: only now do we know where the selection is, and a
+        // point that appears at the pointer and then jumps is worse than one that
+        // appears in the right place.
+        let char_count = text.chars().count();
+        show_trigger_point(&app, cursor_pos, captured.bounds, text);
+
+        mouse::listener::mark_pipeline_result(
+            &state.mouse_trigger_state,
+            format!("Ready: {char_count} chars selected, waiting for the trigger point"),
+            None,
+        );
+        emit_mouse_trigger_state(&app);
+        return;
     }
+
+    translate_and_show(&app, text, guard).await;
+}
+
+/// Translate `text` and put the answer on screen.
+///
+/// Every trigger ends up here with the text already in hand, whether it came from
+/// a capture or from a trigger point the user clicked.
+pub(crate) async fn translate_and_show(
+    app: &tauri::AppHandle,
+    text: String,
+    // Held for the whole translation and not read: the gate has to stay claimed
+    // until the answer is on screen, or a second trigger could start a
+    // translation on top of this one.
+    _gate: GateGuard,
+) {
+    let state = app.state::<AppState>();
 
     let (source_lang, target_lang) = {
         let config = state
@@ -452,7 +516,6 @@ async fn run_translation_pipeline(
         (config.source_lang.clone(), config.target_lang.clone())
     };
 
-    // Translate
     let engine = state.translation_engine.read().await;
     match engine.translate(&text, &source_lang, &target_lang).await {
         Ok(result) => {
@@ -483,7 +546,7 @@ async fn run_translation_pipeline(
                 success_message,
                 None,
             );
-            emit_mouse_trigger_state(&app);
+            emit_mouse_trigger_state(app);
         }
         Err(error) => {
             log::error!("[pipeline] Translation error kind={}", error.kind());
@@ -493,7 +556,7 @@ async fn run_translation_pipeline(
                 "Failed: translation error",
                 Some(format!("Translation error kind: {}", error.kind())),
             );
-            emit_mouse_trigger_state(&app);
+            emit_mouse_trigger_state(app);
         }
     }
 }
@@ -563,6 +626,13 @@ pub fn run() {
 
             let pipeline_gate = Arc::new(pipeline::PipelineGate::default());
 
+            // The popup becomes a real panel before anything can show it, so no
+            // window is ever on screen in the state that activates the app.
+            let panel_window = macos::panel::TriggerPanelWindow::adopt(app.handle());
+            if panel_window.is_none() {
+                log::warn!("[panel] Running with a plain popup window; it will steal focus");
+            }
+
             app.manage(AppState {
                 config: Mutex::new(config),
                 translation_engine: RwLock::new(TranslationEngine::new(
@@ -575,15 +645,13 @@ pub fn run() {
                 pipeline_gate: pipeline_gate.clone(),
                 config_load_problem,
                 config_notices,
+                trigger_panel: Mutex::new(trigger::panel::Panel::new()),
+                panel_window: Mutex::new(panel_window),
             });
 
             // Create system tray
             if let Err(e) = tray::menu::create_tray(app.handle()) {
                 log::error!("[tray] Failed to create tray: {}", e);
-            }
-
-            if let Some(popup) = app.get_webview_window("popup") {
-                macos::window::configure_popup_window(&popup);
             }
 
             // Shared clipboard manager
@@ -679,6 +747,9 @@ pub fn run() {
             commands::diagnostics::reveal_diagnostics_folder,
             commands::diagnostics::open_accessibility_settings,
             commands::diagnostics::log_frontend_event,
+            commands::trigger::expand_trigger_panel,
+            commands::trigger::resize_trigger_panel,
+            commands::trigger::dismiss_trigger_panel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -694,11 +765,4 @@ mod tests {
         assert!(LOG_ROTATION_KEEP_FILES <= 5);
     }
 
-    /// The gap and the margin both take space away from the popup. On the
-    /// smallest display worth supporting they must still leave room for one.
-    #[test]
-    fn the_popup_offsets_are_small_enough_for_a_small_display() {
-        let smallest_display_height = 600.0_f64;
-        assert!(POPUP_GAP + POPUP_SCREEN_MARGIN < smallest_display_height / 4.0);
-    }
 }

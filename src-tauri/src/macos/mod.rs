@@ -7,5 +7,6 @@
 //! alone tested, on the platform the app actually ships for.
 
 pub mod ax;
+pub mod panel;
 pub mod permission;
 pub mod window;

@@ -9,6 +9,7 @@
 //! * [`reducer`] — whether a mouse event should start a translation.
 //! * [`placement`] — where a small window goes near a selection.
 
+pub mod panel;
 pub mod placement;
 pub mod reducer;
 

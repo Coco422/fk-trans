@@ -32,6 +32,10 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 objc = "0.2"
+# Swizzles a Tauri window into a real NSPanel. Without this the popup is a plain
+# NSWindow, and a plain NSWindow activates the app when clicked and swallows the
+# first click — see src/macos/window.rs.
+tauri-nspanel = "2.1"
 core-foundation = "0.10"
 core-graphics = "0.24"
 log = "0.4"

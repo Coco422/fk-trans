@@ -38,35 +38,3 @@ pub fn focus_window(window: &tauri::WebviewWindow) {
         log::warn!("Failed to focus a window on the main thread: {error}");
     }
 }
-
-/// Make a window a non-activating, floating, transparent panel.
-///
-/// Note what this does *not* achieve: `NSNonactivatingPanelMask` is only
-/// meaningful on an `NSPanel`, and Tauri's windows are plain `NSWindow`s, so
-/// setting that bit is ignored. This currently works because the app runs as an
-/// accessory and nothing ever calls `makeKeyAndOrderFront` on the popup — which
-/// is why the popup is described as non-activating by accident rather than by
-/// construction. Replacing this with a real `NSPanel` is the fix.
-pub fn configure_popup_window(window: &tauri::WebviewWindow) {
-    let target = window.clone();
-    if let Err(error) = window.run_on_main_thread(move || {
-        if let Ok(ns_window_ptr) = target.ns_window() {
-            let ns_window = ns_window_ptr as *mut Object;
-            unsafe {
-                // NSWindowStyleMaskBorderless | NSNonactivatingPanelMask
-                let style_mask: u64 = 0 | (1 << 7);
-                let _: () = msg_send![ns_window, setStyleMask: style_mask];
-
-                // NSStatusWindowLevel
-                let _: () = msg_send![ns_window, setLevel: 25i64];
-                let _: () = msg_send![ns_window, setHidesOnDeactivate: false];
-
-                let background: *mut Object = msg_send![class!(NSColor), clearColor];
-                let _: () = msg_send![ns_window, setBackgroundColor: background];
-                let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: true];
-            }
-        }
-    }) {
-        log::warn!("Failed to configure the popup window on the main thread: {error}");
-    }
-}

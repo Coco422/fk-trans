@@ -145,6 +145,39 @@ export function logFrontendEvent(args: {
 }
 
 /**
+ * The trigger point was clicked.
+ *
+ * Rust expands the panel and runs the translation; the result arrives on the
+ * usual `translation-ready` event. Rejects when the point is no longer on
+ * screen, which is what a click that lost the race with the expiry timer gets.
+ */
+export function expandTriggerPanel(): Promise<void> {
+  return call<void>("expand_trigger_panel");
+}
+
+/**
+ * Report the card's measured height so Rust can size the window to it.
+ *
+ * Only the rendered, wrapped text knows how tall the card needs to be, and the
+ * window has to be exactly that tall — it is transparent, so anything larger is
+ * a rectangle that swallows clicks meant for the app behind it.
+ */
+export function resizeTriggerPanel(height: number): Promise<void> {
+  return call<void>("resize_trigger_panel", { height });
+}
+
+/**
+ * Dismiss whatever the panel is showing.
+ *
+ * The window is hidden rather than closed, so this is how Escape, the close
+ * button and the idle timer all end. Rust owns the panel's state, so hiding the
+ * window from here instead would leave it believing the panel is still up.
+ */
+export function dismissTriggerPanel(): Promise<void> {
+  return call<void>("dismiss_trigger_panel");
+}
+
+/**
  * Writes text to the clipboard through the clipboard plugin.
  *
  * `navigator.clipboard` is unavailable in the popup window, so this is the
