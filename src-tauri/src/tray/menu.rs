@@ -1,6 +1,5 @@
 use crate::config;
-#[cfg(target_os = "macos")]
-use crate::platform;
+use crate::macos;
 use crate::AppState;
 use tauri::{
     menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
@@ -102,8 +101,7 @@ fn reveal_window(window: &tauri::WebviewWindow) {
     let _ = window.set_always_on_top(true);
     let _ = window.show();
 
-    #[cfg(target_os = "macos")]
-    platform::macos::focus_window(window);
+    macos::window::focus_window(window);
 
     let _ = window.set_focus();
 

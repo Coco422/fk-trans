@@ -7,6 +7,11 @@ export type AppConfig = {
 version: number, enabled: boolean, debugLogging: boolean, selectionTriggerEnabled: boolean, sourceLang: string, targetLang: string, activeProvider: string, mouseTriggerButton: number, providers: Array<ProviderConfig>, };
 
 /**
+ * Which strategy produced the text.
+ */
+export type CaptureStrategy = "accessibility" | "pasteboard";
+
+/**
  * Why the config file could not be used. Kept after loading so diagnostics can
  * say what happened, instead of the app silently showing defaults and looking
  * like the user's settings reset themselves.

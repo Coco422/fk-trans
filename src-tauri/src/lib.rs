@@ -1,30 +1,42 @@
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
+// The app is macOS-only by decision, not by omission: the trigger layer is built
+// on CGEventTap and the Accessibility API, and the popup relies on AppKit window
+// behaviour. A build for another platform would be a different program, so say so
+// here rather than compiling a half-working one out of `#[cfg]` forks nobody ever
+// runs.
+#[cfg(not(target_os = "macos"))]
+compile_error!("fk-trans targets macOS only; see README.md");
+
+mod capture;
 mod clipboard;
 mod commands;
 mod compat;
 mod config;
 mod history;
+mod macos;
 mod mouse;
 mod pipeline;
-mod platform;
 mod translate;
 mod tray;
+mod trigger;
 
 use config::AppConfig;
 use history::HistoryStore;
+use macos::ax::ScreenRect;
 use mouse::listener::{MouseTriggerEvent, TriggerSource};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, PhysicalPosition};
 use tokio::sync::RwLock;
-use tokio::time::{sleep, timeout, Duration};
 use translate::TranslationEngine;
+use trigger::placement::{self, Point, Size};
 
-const POPUP_CURSOR_OFFSET_X: f64 = 14.0;
-const POPUP_CURSOR_OFFSET_Y: f64 = 16.0;
+/// Distance between the popup and whatever it is anchored to.
+const POPUP_GAP: f64 = 10.0;
+/// The closest the popup may come to the edge of the usable screen area.
 const POPUP_SCREEN_MARGIN: f64 = 8.0;
 const LOG_MAX_FILE_SIZE_BYTES: u64 = 512 * 1024;
 const LOG_ROTATION_KEEP_FILES: usize = 4;
-const CLIPBOARD_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
-const SELECTION_CAPTURE_SETTLE_DELAY: Duration = Duration::from_millis(120);
 
 /// Payload of the `translation-ready` event.
 ///
@@ -132,55 +144,134 @@ fn current_cursor_position(app: &tauri::AppHandle) -> PhysicalPosition<f64> {
     }
 }
 
-fn popup_position_for_cursor(
-    window: &tauri::WebviewWindow,
-    cursor: PhysicalPosition<f64>,
-) -> PhysicalPosition<i32> {
-    let mut x = cursor.x + POPUP_CURSOR_OFFSET_X;
-    let mut y = cursor.y + POPUP_CURSOR_OFFSET_Y;
-
-    if let (Ok(size), Ok(Some(monitor))) = (
-        window.outer_size(),
-        window.monitor_from_point(cursor.x, cursor.y),
-    ) {
-        let work_area = monitor.work_area();
-        let left = work_area.position.x as f64 + POPUP_SCREEN_MARGIN;
-        let top = work_area.position.y as f64 + POPUP_SCREEN_MARGIN;
-        let right = work_area.position.x as f64 + work_area.size.width as f64 - POPUP_SCREEN_MARGIN;
-        let bottom =
-            work_area.position.y as f64 + work_area.size.height as f64 - POPUP_SCREEN_MARGIN;
-        let width = size.width as f64;
-        let height = size.height as f64;
-
-        if x + width > right {
-            x = cursor.x - width - POPUP_CURSOR_OFFSET_X;
-        }
-        if y + height > bottom {
-            y = cursor.y - height - POPUP_CURSOR_OFFSET_Y;
-        }
-
-        x = x.max(left).min((right - width).max(left));
-        y = y.max(top).min((bottom - height).max(top));
-    }
-
-    PhysicalPosition::new(x.round() as i32, y.round() as i32)
+/// The scale factor of the display the pointer is on.
+///
+/// Accessibility and Tauri both express logical positions in points, but Tauri
+/// reports the pointer in physical pixels, so the pointer has to be converted
+/// back before it can be used as a logical anchor.
+fn scale_factor_at(window: &tauri::WebviewWindow, cursor: PhysicalPosition<f64>) -> f64 {
+    window
+        .monitor_from_point(cursor.x, cursor.y)
+        .ok()
+        .flatten()
+        .map(|monitor| monitor.scale_factor())
+        .unwrap_or(1.0)
 }
 
-fn show_popup_at_cursor(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
-    if let Some(window) = app.get_webview_window("popup") {
-        let popup_pos = popup_position_for_cursor(&window, cursor);
-        log::info!(
-            "[pipeline] Showing popup at ({}, {})",
-            popup_pos.x,
-            popup_pos.y
-        );
-        let _ = window.set_position(tauri::Position::Physical(popup_pos));
-        let _ = window.show();
+/// The usable area of the display the pointer is on, in logical points.
+///
+/// Taken from the pointer rather than from the selection because a selection is
+/// always on the display the pointer that made it is on, and the pointer is the
+/// one Tauri can answer questions about in physical coordinates.
+fn work_area_at(window: &tauri::WebviewWindow, cursor: PhysicalPosition<f64>) -> Option<ScreenRect> {
+    let monitor = window
+        .monitor_from_point(cursor.x, cursor.y)
+        .ok()
+        .flatten()?;
+    // Each half converts on its own: `PhysicalRect` has no conversion, because a
+    // position and a size do not scale the same way (`ceil` vs `floor`).
+    let area = monitor.work_area();
+    let scale = monitor.scale_factor();
+    let position = area.position.to_logical::<f64>(scale);
+    let size = area.size.to_logical::<f64>(scale);
+
+    Some(ScreenRect {
+        x: position.x,
+        y: position.y,
+        width: size.width,
+        height: size.height,
+    })
+}
+
+/// Where to put the popup, in logical points.
+///
+/// Anchored to the selection when the app reported its geometry, and to the
+/// pointer otherwise. Anchoring to the selection is the point of asking
+/// Accessibility for its rectangle at all: the popup opens beside the words being
+/// translated rather than beside wherever the pointer ended up.
+///
+/// A selection gets the same treatment a small box next to any selection gets —
+/// just outside its bottom-right corner, flipping to the other side when there is
+/// no room. The trigger point will land in exactly the same place, smaller.
+fn popup_origin(
+    window: &tauri::WebviewWindow,
+    cursor: PhysicalPosition<f64>,
+    bounds: Option<ScreenRect>,
+    popup: Size,
+) -> Point {
+    let cursor_point = || {
+        let logical = cursor.to_logical::<f64>(scale_factor_at(window, cursor));
+        Point {
+            x: logical.x,
+            y: logical.y,
+        }
+    };
+
+    let Some(work_area) = work_area_at(window, cursor) else {
+        // Nothing to clamp against. Roughly the right place beats not showing it.
+        let anchor = bounds.map_or_else(cursor_point, |rect| Point {
+            x: rect.right(),
+            y: rect.bottom(),
+        });
+        return Point {
+            x: anchor.x + POPUP_GAP,
+            y: anchor.y + POPUP_GAP,
+        };
+    };
+
+    match bounds {
+        Some(rect) => {
+            placement::trigger_point(rect, popup, work_area, POPUP_GAP, POPUP_SCREEN_MARGIN)
+        }
+        None => placement::panel_origin(
+            cursor_point(),
+            popup,
+            work_area,
+            POPUP_GAP,
+            POPUP_SCREEN_MARGIN,
+        ),
     }
+}
+
+fn popup_size(window: &tauri::WebviewWindow, scale: f64) -> Option<Size> {
+    let size = window.outer_size().ok()?.to_logical::<f64>(scale);
+
+    Some(Size {
+        width: size.width,
+        height: size.height,
+    })
+}
+
+fn show_popup(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, bounds: Option<ScreenRect>) {
+    let Some(window) = app.get_webview_window("popup") else {
+        log::warn!("[pipeline] No popup window to show");
+        return;
+    };
+    let scale = scale_factor_at(&window, cursor);
+    let Some(size) = popup_size(&window, scale) else {
+        log::warn!("[pipeline] Could not measure the popup window");
+        return;
+    };
+
+    let origin = popup_origin(&window, cursor, bounds, size);
+    log::info!(
+        "[pipeline] Showing popup at ({:.0}, {:.0}), anchored to {}",
+        origin.x,
+        origin.y,
+        if bounds.is_some() {
+            "the selection"
+        } else {
+            "the cursor"
+        }
+    );
+    let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(
+        origin.x, origin.y,
+    )));
+    let _ = window.show();
 }
 
 fn show_popup_error(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, message: String) {
-    show_popup_at_cursor(app, cursor);
+    show_popup(app, cursor, None);
     let _ = app.emit("translation-error", message);
 }
 
@@ -295,37 +386,33 @@ async fn run_translation_pipeline(
         return;
     }
 
-    if is_selection_source {
-        sleep(SELECTION_CAPTURE_SETTLE_DELAY).await;
-    } else {
-        // Show a visible loading state before explicit triggers so failures are observable.
-        show_popup_at_cursor(&app, cursor_pos);
+    if !is_selection_source {
+        // An explicit trigger gets a visible loading state before the capture,
+        // which can take a moment: without it a slow or failing capture is
+        // indistinguishable from the app ignoring the click.
+        show_popup(&app, cursor_pos, None);
         let _ = app.emit("translation-started", ());
     }
 
+    // The strategy chain does its own waiting: it lets the app settle after the
+    // mouse-up, bounds each attempt, and decides whether the pasteboard fallback
+    // is worth trying. Reading a selection before the app has finished making it
+    // is the main reason the old capture was unreliable.
     log::info!("[pipeline] Capturing selected text...");
-    let text = match timeout(CLIPBOARD_CAPTURE_TIMEOUT, cm.capture_selected_text()).await {
-        Ok(Some(t)) => {
-            log::info!(
-                "[pipeline] Captured text: chars={} hash={:016x}",
-                t.chars().count(),
-                text_hash(&t)
-            );
-            t
-        }
-        Ok(None) => {
-            log::warn!("[pipeline] No text captured, skipping");
-            let state = app.state::<AppState>();
-            if is_selection_source {
-                mouse::listener::mark_pipeline_result(
-                    &state.mouse_trigger_state,
-                    "Ignored: selection drag produced no captured text",
-                    None,
-                );
-                emit_mouse_trigger_state(&app);
-                return;
-            }
+    let state = app.state::<AppState>();
+    let capture = capture::capture_selection(&cm, true).await;
+    let capture_note = capture.summary();
+    log::info!("[pipeline] Capture: {capture_note}");
 
+    let Some(captured) = capture.captured else {
+        log::warn!("[pipeline] No text captured, skipping: {capture_note}");
+        if is_selection_source {
+            mouse::listener::mark_pipeline_result(
+                &state.mouse_trigger_state,
+                "Ignored: selection drag produced no captured text",
+                Some(capture_note),
+            );
+        } else {
             let _ = app.emit(
                 "translation-error",
                 "No selected text captured. Select text in another app and try again.".to_string(),
@@ -333,49 +420,29 @@ async fn run_translation_pipeline(
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
                 "Failed: no selected text captured",
-                Some("Clipboard capture did not return selected text".to_string()),
+                Some(capture_note),
             );
-            emit_mouse_trigger_state(&app);
-            return;
         }
-        Err(_) => {
-            log::error!(
-                "[pipeline] Clipboard capture timed out after {} ms",
-                CLIPBOARD_CAPTURE_TIMEOUT.as_millis()
-            );
-            let state = app.state::<AppState>();
-            if is_selection_source {
-                mouse::listener::mark_pipeline_result(
-                    &state.mouse_trigger_state,
-                    "Ignored: selection clipboard capture timed out",
-                    Some("Clipboard capture timeout".to_string()),
-                );
-                emit_mouse_trigger_state(&app);
-                return;
-            }
-
-            let _ = app.emit(
-                "translation-error",
-                "Clipboard capture timed out. Try again after selecting text in the target app."
-                    .to_string(),
-            );
-            mouse::listener::mark_pipeline_result(
-                &state.mouse_trigger_state,
-                "Failed: clipboard capture timed out",
-                Some("Clipboard capture timeout".to_string()),
-            );
-            emit_mouse_trigger_state(&app);
-            return;
-        }
+        emit_mouse_trigger_state(&app);
+        return;
     };
 
+    let text = captured.text;
+    log::info!(
+        "[pipeline] Captured text via {}: chars={} hash={:016x}",
+        captured.strategy.label(),
+        text.chars().count(),
+        text_hash(&text)
+    );
+
     if is_selection_source {
-        show_popup_at_cursor(&app, cursor_pos);
+        // Deliberately after the capture, not before: only now do we know where
+        // the selection is, and a popup that appears at the pointer and then jumps
+        // is worse than one that appears in the right place.
+        show_popup(&app, cursor_pos, captured.bounds);
         let _ = app.emit("translation-started", ());
     }
 
-    // Get config values
-    let state = app.state::<AppState>();
     let (source_lang, target_lang) = {
         let config = state
             .config
@@ -458,16 +525,14 @@ pub fn run() {
         .setup(|app| {
             install_panic_hook();
 
-            // Hide dock icon on macOS
-            #[cfg(target_os = "macos")]
             {
-                platform::macos::set_accessory_activation_policy(app.handle());
+                macos::window::set_accessory_activation_policy(app.handle());
 
-                if !platform::macos::check_accessibility_permissions() {
+                if !macos::permission::is_granted() {
                     log::warn!(
                         "Accessibility permissions not granted. Mouse listener may not work."
                     );
-                    let _ = platform::macos::request_accessibility_permissions();
+                    let _ = macos::permission::request();
                 }
             }
 
@@ -516,12 +581,8 @@ pub fn run() {
                 log::error!("[tray] Failed to create tray: {}", e);
             }
 
-            // Configure popup window as non-activating on macOS
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(popup) = app.get_webview_window("popup") {
-                    platform::macos::configure_popup_window(&popup);
-                }
+            if let Some(popup) = app.get_webview_window("popup") {
+                macos::window::configure_popup_window(&popup);
             }
 
             // Shared clipboard manager
@@ -637,8 +698,11 @@ mod tests {
         assert!(LOG_ROTATION_KEEP_FILES <= 5);
     }
 
+    /// The gap and the margin both take space away from the popup. On the
+    /// smallest display worth supporting they must still leave room for one.
     #[test]
-    fn clipboard_capture_timeout_is_short() {
-        assert!(CLIPBOARD_CAPTURE_TIMEOUT <= Duration::from_secs(5));
+    fn the_popup_offsets_are_small_enough_for_a_small_display() {
+        let smallest_display_height = 600.0_f64;
+        assert!(POPUP_GAP + POPUP_SCREEN_MARGIN < smallest_display_height / 4.0);
     }
 }

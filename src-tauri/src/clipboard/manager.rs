@@ -12,14 +12,10 @@ use super::pasteboard::{system_pasteboard, Pasteboard, RestoreOnDrop};
 use std::sync::Arc;
 use tokio::time::{sleep, timeout, Duration};
 
-#[cfg(not(target_os = "macos"))]
-use std::panic::{catch_unwind, AssertUnwindSafe};
-
 /// The shortest selection worth translating. A single character is almost always
 /// an accidental click-drag rather than something the user meant to select.
 const MIN_SELECTION_CHARS: usize = 2;
 
-#[cfg(target_os = "macos")]
 const MACOS_ANSI_C_KEYCODE: u16 = 0x08;
 
 #[derive(Debug, Clone, Copy)]
@@ -35,7 +31,6 @@ pub const DEFAULT_CAPTURE_TIMING: CaptureTiming = CaptureTiming {
     poll_attempts: 24,
 };
 
-#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CopyKeyEvent {
     keycode: u16,
@@ -69,7 +64,7 @@ impl ClipboardManager {
     }
 
     pub async fn capture_selected_text(&self) -> Option<String> {
-        self.capture_with(Self::send_copy_shortcut()).await
+        self.capture_with(async { Self::send_copy_shortcut() }).await
     }
 
     /// The capture flow with the synthesised keystroke injected, so the
@@ -148,20 +143,9 @@ impl ClipboardManager {
         Some(text)
     }
 
-    async fn send_copy_shortcut() -> Result<(), String> {
-        #[cfg(target_os = "macos")]
-        {
-            Self::send_copy_shortcut_macos()
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            Self::send_copy_shortcut_enigo().await
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    fn send_copy_shortcut_macos() -> Result<(), String> {
+    /// Synthesise Cmd+C so the frontmost app puts its selection on the
+    /// pasteboard for us to read.
+    fn send_copy_shortcut() -> Result<(), String> {
         use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
         use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
@@ -183,36 +167,8 @@ impl ClipboardManager {
         log::debug!("[clipboard] CoreGraphics Cmd+C completed");
         Ok(())
     }
-
-    #[cfg(not(target_os = "macos"))]
-    async fn send_copy_shortcut_enigo() -> Result<(), String> {
-        use enigo::{
-            Direction::{Click, Press, Release},
-            Enigo, Key, Keyboard, Settings,
-        };
-
-        tokio::task::spawn_blocking(|| {
-            catch_unwind(AssertUnwindSafe(|| {
-                log::debug!("[clipboard] Creating Enigo");
-                let mut enigo = Enigo::new(&Settings::default()).map_err(|e| e.to_string())?;
-
-                enigo.key(Key::Meta, Press).map_err(|e| e.to_string())?;
-                let click_result = enigo.key(Key::Unicode('c'), Click);
-                let release_result = enigo.key(Key::Meta, Release);
-
-                click_result.map_err(|e| e.to_string())?;
-                release_result.map_err(|e| e.to_string())?;
-                log::debug!("[clipboard] Enigo Cmd+C completed");
-                Ok(())
-            }))
-            .map_err(|_| "Enigo panicked while simulating Cmd+C".to_string())?
-        })
-        .await
-        .map_err(|e| format!("Cmd+C worker failed: {}", e))?
-    }
 }
 
-#[cfg(target_os = "macos")]
 fn macos_copy_key_sequence() -> [CopyKeyEvent; 4] {
     use core_graphics::event::KeyCode;
 
@@ -242,10 +198,8 @@ fn macos_copy_key_sequence() -> [CopyKeyEvent; 4] {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
     use super::*;
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_copy_sequence_uses_raw_command_c_keycodes() {
         use core_graphics::event::KeyCode;

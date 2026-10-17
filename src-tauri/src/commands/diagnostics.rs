@@ -300,9 +300,8 @@ fn current_snapshot(app: &AppHandle, state: &AppState) -> DiagnosticsSnapshot {
         .clone();
     let mut mouse = listener::snapshot(&state.mouse_trigger_state);
 
-    #[cfg(target_os = "macos")]
     {
-        mouse.accessibility_trusted = crate::platform::macos::check_accessibility_permissions();
+        mouse.accessibility_trusted = crate::macos::permission::is_granted();
         if !mouse.accessibility_trusted
             && !matches!(
                 mouse.status,
@@ -388,14 +387,7 @@ pub fn reveal_diagnostics_folder(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub fn open_accessibility_settings() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        crate::platform::macos::open_accessibility_settings()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err("Accessibility settings shortcut is only available on macOS".to_string())
-    }
+    crate::macos::permission::open_settings()
 }
 
 #[tauri::command]
@@ -435,30 +427,11 @@ pub fn log_frontend_event(
 }
 
 fn open_path(path: &Path) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(path)
-            .spawn()
-            .map_err(|e| format!("Failed to open path: {}", e))?;
-        Ok(())
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .arg(path)
-            .spawn()
-            .map_err(|e| format!("Failed to open path: {}", e))?;
-        Ok(())
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .map_err(|e| format!("Failed to open path: {}", e))?;
-        Ok(())
-    }
+    std::process::Command::new("open")
+        .arg(path)
+        .spawn()
+        .map_err(|error| format!("Failed to open path: {error}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

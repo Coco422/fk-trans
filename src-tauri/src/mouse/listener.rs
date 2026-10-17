@@ -245,13 +245,12 @@ impl Drop for MouseListener {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn start_platform_listener(
     running: Arc<AtomicBool>,
     tx: Sender<MouseTriggerEvent>,
     state: SharedMouseTriggerState,
 ) {
-    use crate::platform;
+    use crate::macos::permission;
     use core_foundation::runloop::{kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop};
     use core_graphics::event::{
         CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
@@ -270,10 +269,10 @@ fn start_platform_listener(
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 guard.status = MouseTriggerStatus::Starting;
-                guard.accessibility_trusted = platform::macos::check_accessibility_permissions();
+                guard.accessibility_trusted = permission::is_granted();
             }
 
-            if !platform::macos::check_accessibility_permissions() {
+            if !permission::is_granted() {
                 {
                     let mut guard = state
                         .lock()
@@ -287,7 +286,7 @@ fn start_platform_listener(
                 if !prompted_for_accessibility {
                     prompted_for_accessibility = true;
                     log::warn!("[mouse] Accessibility permission missing; requesting macOS prompt");
-                    let _ = platform::macos::request_accessibility_permissions();
+                    let _ = permission::request();
                 }
                 std::thread::sleep(Duration::from_secs(1));
                 continue;
@@ -486,7 +485,7 @@ fn start_platform_listener(
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     guard.status = MouseTriggerStatus::Failed;
                     guard.accessibility_trusted =
-                        platform::macos::check_accessibility_permissions();
+                        permission::is_granted();
                     guard.last_error = Some(reason);
                 }
                 std::thread::sleep(Duration::from_secs(1));
@@ -553,147 +552,6 @@ fn start_platform_listener(
     });
 }
 
-#[cfg(not(target_os = "macos"))]
-fn start_platform_listener(
-    running: Arc<AtomicBool>,
-    tx: Sender<MouseTriggerEvent>,
-    state: SharedMouseTriggerState,
-) {
-    use rdev::{listen, Button, Event, EventType};
-
-    std::thread::spawn(move || {
-        {
-            let mut guard = state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.status = MouseTriggerStatus::Listening;
-            guard.accessibility_trusted = true;
-        }
-
-        let callback_state = state.clone();
-        let drag_tracker = Arc::new(Mutex::new(SelectionDragTracker::default()));
-        let last_mouse_pos = Arc::new(Mutex::new(None::<(f64, f64)>));
-        let callback_drag_tracker = drag_tracker.clone();
-        let callback_mouse_pos = last_mouse_pos.clone();
-        let callback = move |event: Event| {
-            if !running.load(Ordering::SeqCst) {
-                return;
-            }
-
-            match event.event_type {
-                EventType::MouseMove { x, y } => {
-                    let mut pos = callback_mouse_pos
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    *pos = Some((x, y));
-                }
-                EventType::ButtonPress(Button::Left) => {
-                    let timestamp_ms = now_millis();
-                    if let Some((x, y)) = *callback_mouse_pos
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    {
-                        let mut tracker = callback_drag_tracker
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        tracker.start = Some(DragPoint { x, y, timestamp_ms });
-                    }
-
-                    let mut guard = callback_state
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    guard.status = MouseTriggerStatus::EventReceived;
-                    guard.last_button = Some(0);
-                    guard.last_event_at = Some(timestamp_ms);
-                }
-                EventType::ButtonRelease(Button::Left) => {
-                    let timestamp_ms = now_millis();
-                    let Some((x, y)) = *callback_mouse_pos
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    else {
-                        return;
-                    };
-                    let end = DragPoint { x, y, timestamp_ms };
-                    let (start, last_trigger_at) = {
-                        let mut tracker = callback_drag_tracker
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        let start = tracker.start.take();
-                        (start, tracker.last_trigger_at)
-                    };
-                    let Some(start) = start else {
-                        return;
-                    };
-
-                    let should_trigger = {
-                        let mut guard = callback_state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        guard.status = MouseTriggerStatus::EventReceived;
-                        guard.last_button = Some(0);
-                        guard.last_event_at = Some(timestamp_ms);
-
-                        let should_trigger = is_selection_drag(
-                            start,
-                            end,
-                            last_trigger_at,
-                            guard.selection_trigger_enabled,
-                        );
-                        if should_trigger {
-                            guard.last_trigger_at = Some(timestamp_ms);
-                            guard.last_pipeline_result =
-                                Some("Selection drag detected".to_string());
-                        }
-                        should_trigger
-                    };
-
-                    if should_trigger {
-                        let mut tracker = callback_drag_tracker
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        tracker.last_trigger_at = Some(timestamp_ms);
-                        let _ = tx.send(MouseTriggerEvent {
-                            button: 0,
-                            is_trigger: true,
-                            source: TriggerSource::MouseSelection,
-                            timestamp_ms,
-                        });
-                    }
-                }
-                EventType::ButtonPress(Button::Middle) => {
-                    let timestamp_ms = now_millis();
-                    {
-                        let mut guard = callback_state
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        guard.status = MouseTriggerStatus::EventReceived;
-                        guard.last_button = Some(2);
-                        guard.last_event_at = Some(timestamp_ms);
-                        guard.last_trigger_at = Some(timestamp_ms);
-                    }
-                    let _ = tx.send(MouseTriggerEvent {
-                        button: 2,
-                        is_trigger: true,
-                        source: TriggerSource::MouseMiddle,
-                        timestamp_ms,
-                    });
-                }
-                _ => {}
-            }
-        };
-
-        if let Err(e) = listen(callback) {
-            let reason = format!("Mouse listener error: {:?}", e);
-            log::error!("[mouse] {}", reason);
-            let mut guard = state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.status = MouseTriggerStatus::Failed;
-            guard.last_error = Some(reason);
-        }
-    });
-}
 
 #[cfg(test)]
 mod tests {

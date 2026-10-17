@@ -78,17 +78,9 @@ impl Drop for RestoreOnDrop<'_> {
 
 /// The real system pasteboard.
 pub fn system_pasteboard() -> Arc<dyn Pasteboard> {
-    #[cfg(target_os = "macos")]
-    {
-        Arc::new(macos::MacPasteboard)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Arc::new(arboard::ArboardPasteboard)
-    }
+    Arc::new(macos::MacPasteboard)
 }
 
-#[cfg(target_os = "macos")]
 mod macos {
     use super::{Pasteboard, PasteboardItem, PasteboardSnapshot, UTF8_TEXT_TYPE};
     use objc::rc::autoreleasepool;
@@ -265,58 +257,6 @@ mod macos {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-mod arboard_backend {
-    use super::{Pasteboard, PasteboardItem, PasteboardSnapshot, UTF8_TEXT_TYPE};
-    use arboard::Clipboard;
-    use std::sync::Mutex;
-
-    /// Non-macOS fallback kept only so the crate still builds there. It cannot
-    /// preserve non-text clipboard content; macOS is the supported target.
-    pub struct ArboardPasteboard {
-        change_count: Mutex<i64>,
-    }
-
-    impl Pasteboard for ArboardPasteboard {
-        fn change_count(&self) -> i64 {
-            *self.change_count.lock().unwrap_or_else(|p| p.into_inner())
-        }
-
-        fn snapshot(&self) -> Option<PasteboardSnapshot> {
-            let text = Clipboard::new().ok()?.get_text().ok()?;
-            Some(PasteboardSnapshot {
-                items: vec![PasteboardItem {
-                    entries: vec![(UTF8_TEXT_TYPE.to_string(), text.into_bytes())],
-                }],
-            })
-        }
-
-        fn restore(&self, snapshot: &PasteboardSnapshot) {
-            let text = snapshot
-                .items
-                .first()
-                .and_then(|item| {
-                    item.entries
-                        .iter()
-                        .find(|(type_id, _)| type_id == UTF8_TEXT_TYPE)
-                })
-                .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned());
-            if let Some(text) = text {
-                if let Ok(mut clipboard) = Clipboard::new() {
-                    let _ = clipboard.set_text(text);
-                }
-            }
-        }
-
-        fn read_text(&self) -> Option<String> {
-            Clipboard::new().ok()?.get_text().ok()
-        }
-
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub use arboard_backend::ArboardPasteboard;
 
 #[cfg(test)]
 mod tests {
@@ -325,7 +265,6 @@ mod tests {
     /// The system pasteboard is one global resource. The backend's access lock
     /// serialises individual calls but not a whole snapshot → assert → restore
     /// sequence, so these tests must not interleave with each other.
-    #[cfg(target_os = "macos")]
     fn pasteboard_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -364,7 +303,6 @@ mod tests {
     ///
     /// Only re-writes the pasteboard with the content it already holds, so it
     /// cannot cost the user anything they had copied.
-    #[cfg(target_os = "macos")]
     #[test]
     fn real_pasteboard_survives_a_snapshot_and_restore() {
         let _serial = pasteboard_test_lock();
@@ -396,7 +334,6 @@ mod tests {
     /// writing this test without the access lock segfaulted the test binary.
     /// Captures run on Tauri worker threads, so the serialisation has to hold
     /// even when several callers arrive together.
-    #[cfg(target_os = "macos")]
     #[test]
     fn real_pasteboard_tolerates_concurrent_access() {
         let _serial = pasteboard_test_lock();
@@ -432,7 +369,6 @@ mod tests {
     /// pasteboard: a copied item exposing several types — one of them not text —
     /// must come back whole. The old text-only backup kept just the string and
     /// dropped everything else.
-    #[cfg(target_os = "macos")]
     #[test]
     fn real_pasteboard_round_trips_non_text_types() {
         let _serial = pasteboard_test_lock();
