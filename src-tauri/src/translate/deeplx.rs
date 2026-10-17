@@ -10,7 +10,7 @@ impl DeepLXProvider {
     pub fn new() -> Self {
         Self {
             base_url: "http://127.0.0.1:1188".to_string(),
-            client: Client::new(),
+            client: super::http::shared_client(),
         }
     }
 }

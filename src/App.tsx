@@ -82,6 +82,7 @@ interface DiagnosticsSnapshot {
   mouse: MouseTriggerState;
   active_provider_ready: boolean;
   active_provider_reason?: string | null;
+  config_load_problem?: ConfigLoadProblem | null;
   providers: Array<{
     name: string;
     active: boolean;
@@ -91,6 +92,17 @@ interface DiagnosticsSnapshot {
     api_key_configured: boolean;
     model_configured: boolean;
   }>;
+}
+
+/**
+ * Set at startup when the config file could not be read. Without showing this the
+ * app looks like it simply forgot the user's settings.
+ */
+interface ConfigLoadProblem {
+  path: string;
+  kind: "unreadable" | "malformed";
+  detail: string;
+  backup_path?: string | null;
 }
 
 interface ExportedDiagnostics {
@@ -977,6 +989,33 @@ export default function App() {
                     >
                       {(diag) => (
                         <>
+                          <Show when={diag().config_load_problem}>
+                            {(problem) => (
+                              <div class="p-4 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/30">
+                                <div class="text-sm font-medium text-amber-800 dark:text-amber-200">
+                                  {problem().kind === "malformed"
+                                    ? "Your settings file could not be read"
+                                    : "Your settings file is unavailable"}
+                                </div>
+                                <div class="mt-1 text-xs text-amber-700 dark:text-amber-300 break-all">
+                                  {problem().path}
+                                </div>
+                                <div class="mt-1 text-xs text-amber-700 dark:text-amber-300">
+                                  {problem().detail}
+                                </div>
+                                <Show when={problem().backup_path}>
+                                  <div class="mt-2 text-xs text-amber-800 dark:text-amber-200">
+                                    The original was kept at{" "}
+                                    <span class="font-mono break-all">
+                                      {problem().backup_path}
+                                    </span>
+                                    . Everything below is showing defaults.
+                                  </div>
+                                </Show>
+                              </div>
+                            )}
+                          </Show>
+
                           <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
                             <div class="flex items-start justify-between gap-4 mb-4">
                               <div>

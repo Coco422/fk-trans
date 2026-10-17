@@ -2,6 +2,7 @@ pub mod claude;
 pub mod custom_http;
 pub mod deeplx;
 pub mod gemini;
+pub mod http;
 pub mod ollama;
 pub mod openai_compat;
 pub mod provider;

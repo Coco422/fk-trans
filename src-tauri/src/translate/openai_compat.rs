@@ -24,7 +24,7 @@ impl Default for OpenAICompatProvider {
             extra_params: serde_json::json!({
                 "chat_template_kwargs": { "enable_thinking": false }
             }),
-            client: Client::new(),
+            client: super::http::shared_client(),
         }
     }
 }
@@ -45,7 +45,7 @@ impl OpenAICompatProvider {
             system_prompt: system_prompt.to_string(),
             user_prompt: user_prompt.to_string(),
             extra_params,
-            client: Client::new(),
+            client: super::http::shared_client(),
         }
     }
 

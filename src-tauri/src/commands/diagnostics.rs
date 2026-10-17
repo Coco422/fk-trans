@@ -1,4 +1,4 @@
-use crate::config::{self, AppConfig};
+use crate::config::{self, AppConfig, ConfigLoadProblem};
 use crate::mouse::listener::{self, MouseTriggerState};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,9 @@ pub struct DiagnosticsSnapshot {
     pub active_provider_ready: bool,
     pub active_provider_reason: Option<String>,
     pub providers: Vec<ProviderDiagnostic>,
+    /// Set when the config file could not be read at startup, so the settings UI
+    /// can explain why everything looks like a fresh install.
+    pub config_load_problem: Option<ConfigLoadProblem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +136,26 @@ fn read_recent_logs(log_dir: &Path, config: &AppConfig) -> Vec<String> {
     }
 }
 
+/// A config that failed to load is invisible from the outside: the app just
+/// looks like it forgot everything. Spell it out, including where the original
+/// was kept.
+fn describe_config_problem(problem: Option<&ConfigLoadProblem>) -> String {
+    let Some(problem) = problem else {
+        return "none".to_string();
+    };
+    let kind = match problem.kind {
+        config::ConfigLoadProblemKind::Unreadable => "could not be read",
+        config::ConfigLoadProblemKind::Malformed => "is not valid config",
+    };
+    match &problem.backup_path {
+        Some(backup) => format!(
+            "{} {}: {} (original kept at {})",
+            problem.path, kind, problem.detail, backup
+        ),
+        None => format!("{} {}: {}", problem.path, kind, problem.detail),
+    }
+}
+
 fn build_report(app: &AppHandle, snapshot: &DiagnosticsSnapshot, config: &AppConfig) -> String {
     let log_lines = app_log_dir(app)
         .as_deref()
@@ -157,6 +180,22 @@ fn build_report(app: &AppHandle, snapshot: &DiagnosticsSnapshot, config: &AppCon
         .collect::<Vec<_>>()
         .join("\n");
 
+    // A wedged run is invisible from the outside: the app just stops reacting to
+    // triggers. Report the gate so the failure layer is identifiable from a bug
+    // report rather than inferred from "middle-click does nothing".
+    let gate_held_for_ms = app.try_state::<AppState>().and_then(|state| {
+        state
+            .pipeline_gate
+            .held_for_ms(crate::mouse::listener::now_millis())
+    });
+    let gate_note = match gate_held_for_ms {
+        None => "idle",
+        Some(held) if held >= crate::pipeline::DEFAULT_GATE_LIMIT.as_millis() as i64 => {
+            "WEDGED: held past its limit; the next trigger will reclaim the gate"
+        }
+        Some(_) => "a translation is currently running",
+    };
+
     let report = format!(
         r#"fk-trans diagnostics
 generated_at: {}
@@ -179,6 +218,13 @@ mouse_trigger:
   last_pipeline_result: {:?}
   last_error: {:?}
   test_active_until: {:?}
+
+pipeline_gate:
+  held_for_ms: {:?}
+  note: {}
+
+config_file:
+  problem: {}
 
 provider_readiness:
   active_provider_ready: {}
@@ -206,6 +252,9 @@ recent_logs:
         snapshot.mouse.last_pipeline_result,
         snapshot.mouse.last_error,
         snapshot.mouse.test_active_until,
+        gate_held_for_ms,
+        gate_note,
+        describe_config_problem(snapshot.config_load_problem.as_ref()),
         snapshot.active_provider_ready,
         snapshot.active_provider_reason.as_deref().unwrap_or("none"),
         provider_lines,
@@ -254,6 +303,7 @@ fn current_snapshot(app: &AppHandle, state: &AppState) -> DiagnosticsSnapshot {
         active_provider_ready: active_readiness.is_ok(),
         active_provider_reason: active_readiness.err(),
         providers: provider_diagnostics(&config),
+        config_load_problem: state.config_load_problem.clone(),
     }
 }
 

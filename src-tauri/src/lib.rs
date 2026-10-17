@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod history;
 mod mouse;
+mod pipeline;
 mod platform;
 mod translate;
 mod tray;
@@ -10,10 +11,7 @@ mod tray;
 use config::AppConfig;
 use history::HistoryStore;
 use mouse::listener::{MouseTriggerEvent, TriggerSource};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, PhysicalPosition};
 use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout, Duration};
@@ -34,15 +32,71 @@ pub struct AppState {
     pub history: HistoryStore,
     pub mouse_listener: Mutex<Option<mouse::listener::MouseListener>>,
     pub mouse_trigger_state: mouse::listener::SharedMouseTriggerState,
+    /// Lives in shared state so diagnostics can report a wedged run instead of
+    /// leaving the user with an app that silently ignores every trigger.
+    pub pipeline_gate: Arc<pipeline::PipelineGate>,
+    /// Set when the config file could not be read at startup. Without this the
+    /// app looks like it simply forgot the user's settings.
+    pub config_load_problem: Option<config::ConfigLoadProblem>,
 }
 
-struct PipelineGuard {
-    running: Arc<AtomicBool>,
+/// Releases the pipeline gate when the run ends, however it ends.
+struct GateGuard {
+    gate: Arc<pipeline::PipelineGate>,
+    token: pipeline::GateToken,
 }
 
-impl Drop for PipelineGuard {
+impl Drop for GateGuard {
     fn drop(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
+        self.gate.release(self.token);
+    }
+}
+
+/// Claim the pipeline gate, reporting the outcome to diagnostics.
+///
+/// Returns `None` when a live run already holds the gate. A *reclaimed* gate is
+/// logged as a warning and surfaced in diagnostics, because it means a previous
+/// run wedged — the app recovered, but something upstream is broken and the user
+/// needs to be able to see that rather than just noticing odd behaviour.
+fn acquire_pipeline_gate(
+    app: &tauri::AppHandle,
+    gate: &Arc<pipeline::PipelineGate>,
+) -> Option<GateGuard> {
+    let now_ms = mouse::listener::now_millis();
+
+    match gate.try_acquire(now_ms) {
+        pipeline::GateOutcome::Acquired(token) => Some(GateGuard {
+            gate: gate.clone(),
+            token,
+        }),
+        pipeline::GateOutcome::Reclaimed { token, held_for_ms } => {
+            let note = format!(
+                "Recovered: previous pipeline run was wedged for {}s and was abandoned",
+                held_for_ms / 1000
+            );
+            log::warn!("[pipeline] {}", note);
+            if let Some(state) = app.try_state::<AppState>() {
+                mouse::listener::mark_pipeline_result(&state.mouse_trigger_state, &note, None);
+            }
+            Some(GateGuard {
+                gate: gate.clone(),
+                token,
+            })
+        }
+        pipeline::GateOutcome::Busy { held_for_ms } => {
+            log::info!(
+                "[pipeline] Previous pipeline still running ({}s), skipping trigger",
+                held_for_ms / 1000
+            );
+            if let Some(state) = app.try_state::<AppState>() {
+                mouse::listener::mark_pipeline_result(
+                    &state.mouse_trigger_state,
+                    "Skipped: previous pipeline still running",
+                    None,
+                );
+            }
+            None
+        }
     }
 }
 
@@ -156,26 +210,18 @@ fn install_panic_hook() {
 async fn run_translation_pipeline(
     app: tauri::AppHandle,
     cm: Arc<clipboard::manager::ClipboardManager>,
-    running: Arc<AtomicBool>,
+    gate: Arc<pipeline::PipelineGate>,
     source: TriggerSource,
 ) {
     let is_selection_source = source == TriggerSource::MouseSelection;
-    if running
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        log::info!("[pipeline] Previous pipeline still running, skipping trigger");
-        if let Some(state) = app.try_state::<AppState>() {
-            mouse::listener::mark_pipeline_result(
-                &state.mouse_trigger_state,
-                "Skipped: previous pipeline still running",
-                None,
-            );
+
+    let _guard = match acquire_pipeline_gate(&app, &gate) {
+        Some(guard) => guard,
+        None => {
             emit_mouse_trigger_state(&app);
+            return;
         }
-        return;
-    }
-    let _guard = PipelineGuard { running };
+    };
 
     log::info!(
         "[pipeline] Translation pipeline triggered from {:?}",
@@ -421,7 +467,10 @@ pub fn run() {
             }
 
             // Initialize state
-            let config = config::load_config();
+            let config::ConfigLoad {
+                config,
+                problem: config_load_problem,
+            } = config::load_config();
             apply_log_level(config.debug_logging);
             log::info!(
                 "[logging] Debug logging {}, max_file_size={} bytes, rotated_files_kept={}",
@@ -440,6 +489,8 @@ pub fn run() {
                 config.selection_trigger_enabled,
             );
 
+            let pipeline_gate = Arc::new(pipeline::PipelineGate::default());
+
             app.manage(AppState {
                 config: Mutex::new(config),
                 translation_engine: RwLock::new(TranslationEngine::new(
@@ -449,6 +500,8 @@ pub fn run() {
                 history: HistoryStore::new(),
                 mouse_listener: Mutex::new(None),
                 mouse_trigger_state: mouse_trigger_state.clone(),
+                pipeline_gate: pipeline_gate.clone(),
+                config_load_problem,
             });
 
             // Create system tray
@@ -466,7 +519,6 @@ pub fn run() {
 
             // Shared clipboard manager
             let clipboard_manager = Arc::new(clipboard::manager::ClipboardManager::new());
-            let pipeline_running = Arc::new(AtomicBool::new(false));
 
             // --- Mouse listener pipeline ---
             let app_handle = app.handle().clone();
@@ -483,7 +535,7 @@ pub fn run() {
 
             let app_handle_clone = app_handle.clone();
             let clipboard_clone = clipboard_manager.clone();
-            let mouse_pipeline_running = pipeline_running.clone();
+            let mouse_pipeline_gate = pipeline_gate.clone();
 
             // Use a dedicated thread for receiving to avoid blocking tokio runtime
             std::thread::spawn(move || loop {
@@ -502,11 +554,11 @@ pub fn run() {
                             continue;
                         }
                         let cm = clipboard_clone.clone();
-                        let running = mouse_pipeline_running.clone();
+                        let gate = mouse_pipeline_gate.clone();
                         tauri::async_runtime::spawn(run_translation_pipeline(
                             app,
                             cm,
-                            running,
+                            gate,
                             event.source,
                         ));
                     }
@@ -523,7 +575,7 @@ pub fn run() {
             };
 
             let shortcut_cm = clipboard_manager.clone();
-            let shortcut_pipeline_running = pipeline_running.clone();
+            let shortcut_pipeline_gate = pipeline_gate.clone();
             let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyT);
             let gs = app.global_shortcut();
             match gs.on_shortcut(shortcut, move |app_handle, _shortcut, event| {
@@ -534,11 +586,11 @@ pub fn run() {
                 log::info!("[shortcut] Cmd+Shift+T triggered");
                 let app = app_handle.clone();
                 let cm = shortcut_cm.clone();
-                let running = shortcut_pipeline_running.clone();
+                let gate = shortcut_pipeline_gate.clone();
                 tauri::async_runtime::spawn(run_translation_pipeline(
                     app,
                     cm,
-                    running,
+                    gate,
                     TriggerSource::KeyboardShortcut,
                 ));
             }) {

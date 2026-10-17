@@ -18,7 +18,7 @@ impl Default for ClaudeProvider {
             model: "claude-haiku-4-5-20251001".to_string(),
             system_prompt: "You are a translator. Translate the following text from {from} to {to}. Output ONLY the translation, nothing else.".to_string(),
             user_prompt: "{text}".to_string(),
-            client: Client::new(),
+            client: super::http::shared_client(),
         }
     }
 }
@@ -37,7 +37,7 @@ impl ClaudeProvider {
             model: model.to_string(),
             system_prompt: system_prompt.to_string(),
             user_prompt: user_prompt.to_string(),
-            client: Client::new(),
+            client: super::http::shared_client(),
         }
     }
 

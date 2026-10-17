@@ -15,7 +15,7 @@ impl Default for CustomHttpProvider {
             base_url: String::new(),
             api_key: String::new(),
             headers: HashMap::new(),
-            client: Client::new(),
+            client: super::http::shared_client(),
         }
     }
 }
@@ -26,7 +26,7 @@ impl CustomHttpProvider {
             base_url: base_url.to_string(),
             api_key: api_key.to_string(),
             headers,
-            client: Client::new(),
+            client: super::http::shared_client(),
         }
     }
 }
