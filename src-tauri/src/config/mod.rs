@@ -217,21 +217,18 @@ impl Default for AppConfig {
                 },
                 ProviderConfig {
                     name: "ollama".into(),
-                    base_url: "http://127.0.0.1:11434".into(),
+                    // Ollama's OpenAI-compatible endpoint, so it needs no key and
+                    // uses the same request path as every other provider.
+                    base_url: "http://127.0.0.1:11434/v1".into(),
                     api_key: String::new(),
-                    model: "llama3".into(),
+                    // A translation-specialised model rather than a general one.
+                    model: "translategemma:4b".into(),
                     system_prompt: default_system_prompt(),
                     user_prompt: default_user_prompt(),
-                    extra_params: serde_json::json!({}),
-                },
-                ProviderConfig {
-                    name: "custom_http".into(),
-                    base_url: String::new(),
-                    api_key: String::new(),
-                    model: String::new(),
-                    system_prompt: String::new(),
-                    user_prompt: String::new(),
-                    extra_params: serde_json::json!({}),
+                    // Turns reasoning off. Harmless for a plain translation model
+                    // and necessary for a thinking one: otherwise the popup would
+                    // show the model's reasoning alongside the translation.
+                    extra_params: serde_json::json!({ "reasoning_effort": "none" }),
                 },
             ],
         }
@@ -242,44 +239,59 @@ fn is_blank(value: &str) -> bool {
     value.trim().is_empty()
 }
 
+/// Whether an endpoint lives on this machine.
+///
+/// Local endpoints take no API key: Ollama, LM Studio, and a self-hosted vLLM
+/// have no use for an `Authorization` header. Readiness must not demand one, and
+/// rather than special-case provider names the URL decides.
+pub fn is_loopback_url(url: &str) -> bool {
+    let without_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    // Everything up to the path, i.e. the authority (optionally `user:pass@`).
+    let authority = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority.as_str(), |(_, host)| host);
+
+    // An IPv6 literal is bracketed, and splitting on `:` without honouring the
+    // brackets yields an empty string for `[::1]:8080`.
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0") || host.ends_with(".localhost")
+}
+
 pub fn validate_provider(provider: &ProviderConfig) -> Result<(), String> {
-    match provider.name.as_str() {
-        "deeplx" => {
-            if is_blank(&provider.base_url) {
-                Err("DeepLX base URL is not configured".to_string())
-            } else {
-                Ok(())
-            }
-        }
-        "ollama" => {
-            if is_blank(&provider.base_url) {
-                Err("Ollama base URL is not configured".to_string())
-            } else if is_blank(&provider.model) {
-                Err("Ollama model is not configured".to_string())
-            } else {
-                Ok(())
-            }
-        }
-        "custom_http" => {
-            if is_blank(&provider.base_url) {
-                Err("Custom HTTP endpoint is not configured".to_string())
-            } else {
-                Ok(())
-            }
-        }
-        "openai" | "gemini" | "claude" => {
-            if is_blank(&provider.base_url) {
-                Err(format!("{} base URL is not configured", provider.name))
-            } else if is_blank(&provider.api_key) {
-                Err(format!("{} API key is not configured", provider.name))
-            } else if is_blank(&provider.model) {
-                Err(format!("{} model is not configured", provider.name))
-            } else {
-                Ok(())
-            }
-        }
-        _ => Err(format!("Unknown provider: {}", provider.name)),
+    let name = provider.name.as_str();
+
+    if !crate::translate::SUPPORTED_PROVIDERS.contains(&name) {
+        return Err(format!(
+            "Unknown provider: {name} (supported: {})",
+            crate::translate::SUPPORTED_PROVIDERS.join(", ")
+        ));
     }
+
+    if is_blank(&provider.base_url) {
+        return Err(format!("{name} base URL is not configured"));
+    }
+
+    // DeepLX translates on its own; every other provider needs a model.
+    if name != "deeplx" && is_blank(&provider.model) {
+        return Err(format!("{name} model is not configured"));
+    }
+
+    // A key is only required where one could actually be used. Pointing at a
+    // remote endpoint without one is worth flagging before the user tries it.
+    if !is_loopback_url(&provider.base_url) && is_blank(&provider.api_key) {
+        return Err(format!("{name} API key is not configured"));
+    }
+
+    Ok(())
 }
 
 pub fn validate_active_provider(config: &AppConfig) -> Result<(), String> {
@@ -321,6 +333,10 @@ pub enum ConfigLoadProblemKind {
 pub struct ConfigLoad {
     pub config: AppConfig,
     pub problem: Option<ConfigLoadProblem>,
+    /// Changes made while loading, such as a provider entry that no longer
+    /// exists. Surfaced in Diagnostics because a migration the user cannot see
+    /// is indistinguishable from the app quietly editing their settings.
+    pub notices: Vec<String>,
 }
 
 fn config_dir() -> Result<PathBuf, String> {
@@ -344,6 +360,7 @@ pub fn load_config() -> ConfigLoad {
                 detail,
                 backup_path: None,
             }),
+            notices: Vec::new(),
         },
     }
 }
@@ -356,6 +373,7 @@ pub fn load_config_from(path: &Path) -> ConfigLoad {
             return ConfigLoad {
                 config: AppConfig::default(),
                 problem: None,
+                notices: Vec::new(),
             };
         }
         Err(error) => {
@@ -369,6 +387,7 @@ pub fn load_config_from(path: &Path) -> ConfigLoad {
                     detail,
                     backup_path: None,
                 }),
+                notices: Vec::new(),
             };
         }
     };
@@ -388,9 +407,11 @@ pub fn load_config_from(path: &Path) -> ConfigLoad {
             // writes the current format without every caller having to know.
             config.version = CURRENT_CONFIG_VERSION;
             normalize_extra_params(&mut config, path);
+            let notices = migrate_providers(&mut config, path);
             ConfigLoad {
                 config,
                 problem: None,
+                notices,
             }
         }
         Err(error) => {
@@ -411,9 +432,66 @@ pub fn load_config_from(path: &Path) -> ConfigLoad {
                     detail,
                     backup_path: backup,
                 }),
+                notices: Vec::new(),
             }
         }
     }
+}
+
+/// Bring provider entries written by earlier builds up to date.
+///
+/// Returns a human-readable notice per change. These are surfaced rather than
+/// only logged: silently dropping an entry the user configured, or silently
+/// repointing one, is the same class of surprise as a setting that resets
+/// itself.
+fn migrate_providers(config: &mut AppConfig, path: &Path) -> Vec<String> {
+    let mut notices = Vec::new();
+
+    // `custom_http` no longer exists. Its URL-template mode had no stable
+    // schema, guessed at the response shape, and could send an API key to any
+    // address. Anything it could do, an OpenAI-compatible entry with a different
+    // base_url does with a defined request and response.
+    let removed: Vec<String> = config
+        .providers
+        .iter()
+        .filter(|provider| !crate::translate::SUPPORTED_PROVIDERS.contains(&provider.name.as_str()))
+        .map(|provider| provider.name.clone())
+        .collect();
+    if !removed.is_empty() {
+        config
+            .providers
+            .retain(|provider| crate::translate::SUPPORTED_PROVIDERS.contains(&provider.name.as_str()));
+        for name in removed {
+            let notice = format!(
+                "Removed the '{name}' provider entry: it is no longer supported. \
+                 An OpenAI-compatible provider pointed at the same endpoint covers the same case."
+            );
+            log::warn!("[config] {}: {}", path.display(), notice);
+            notices.push(notice);
+        }
+    }
+
+    // Ollama is reached over its OpenAI-compatible endpoint now, so the base URL
+    // needs the `/v1` path. Without this the old native URL would be asked for
+    // `/chat/completions` and return 404.
+    for provider in &mut config.providers {
+        if provider.name != "ollama" {
+            continue;
+        }
+        let base = provider.base_url.trim().trim_end_matches('/');
+        if base.is_empty() || base.contains("/v1") {
+            continue;
+        }
+        let updated = format!("{base}/v1");
+        let notice = format!(
+            "Updated the Ollama base URL from '{base}' to '{updated}': Ollama is used through its OpenAI-compatible endpoint."
+        );
+        log::info!("[config] {}: {}", path.display(), notice);
+        provider.base_url = updated;
+        notices.push(notice);
+    }
+
+    notices
 }
 
 /// Move an unparseable config aside so a later save cannot overwrite it. Returns
@@ -672,49 +750,133 @@ mod tests {
         assert!(validate_active_provider(&config).is_ok());
     }
 
+    /// A local endpoint has no use for an API key, so readiness must not demand
+    /// one — demanding it is what stopped Ollama from working at all.
     #[test]
-    fn local_providers_are_ready_with_local_endpoint_requirements() {
+    fn a_local_provider_is_ready_without_an_api_key() {
+        let ollama = AppConfig {
+            active_provider: "ollama".to_string(),
+            providers: vec![provider(
+                "ollama",
+                "http://127.0.0.1:11434/v1",
+                "",
+                "translategemma:4b",
+            )],
+            ..AppConfig::default()
+        };
         let deeplx = AppConfig {
             active_provider: "deeplx".to_string(),
             providers: vec![provider("deeplx", "http://127.0.0.1:1188", "", "")],
             ..AppConfig::default()
         };
-        let ollama = AppConfig {
-            active_provider: "ollama".to_string(),
-            providers: vec![provider("ollama", "http://127.0.0.1:11434", "", "llama3")],
-            ..AppConfig::default()
-        };
-        let custom_http = AppConfig {
-            active_provider: "custom_http".to_string(),
-            providers: vec![provider(
-                "custom_http",
-                "http://127.0.0.1:8080/translate",
-                "",
-                "",
-            )],
-            ..AppConfig::default()
-        };
 
         assert!(validate_active_provider(&deeplx).is_ok());
-        assert!(validate_active_provider(&ollama).is_ok());
-        assert!(validate_active_provider(&custom_http).is_ok());
+        assert!(
+            validate_active_provider(&ollama).is_ok(),
+            "got: {:?}",
+            validate_active_provider(&ollama)
+        );
+    }
+
+    /// Loopback is decided by the URL, not by the provider's name, so a local
+    /// endpoint under any supported provider is treated the same way.
+    #[test]
+    fn loopback_endpoints_are_recognised_in_their_usual_spellings() {
+        for url in [
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:11434/v1",
+            "https://LocalHost/v1",
+            "http://[::1]:8080/v1",
+            "http://0.0.0.0:8000",
+            "http://user:pass@127.0.0.1:8080/v1",
+            "127.0.0.1:8000/v1",
+            "http://box.localhost/v1",
+        ] {
+            assert!(is_loopback_url(url), "should be loopback: {url}");
+        }
+
+        for url in [
+            "https://api.openai.com/v1",
+            "https://generativelanguage.googleapis.com/v1beta",
+            "http://192.168.1.9:11434/v1",
+            "http://ollama.internal:11434/v1",
+            // Not loopback just because the string appears somewhere in the host.
+            "https://127.0.0.1.example.com/v1",
+            "",
+        ] {
+            assert!(!is_loopback_url(url), "should not be loopback: {url}");
+        }
     }
 
     #[test]
-    fn local_providers_reject_missing_required_fields() {
-        let ollama = AppConfig {
-            active_provider: "ollama".to_string(),
-            providers: vec![provider("ollama", "http://127.0.0.1:11434", "", "")],
-            ..AppConfig::default()
-        };
-        let custom_http = AppConfig {
-            active_provider: "custom_http".to_string(),
-            providers: vec![provider("custom_http", "", "", "")],
+    fn a_remote_provider_needs_an_api_key() {
+        let openai = AppConfig {
+            active_provider: "openai".to_string(),
+            providers: vec![provider("openai", "https://api.openai.com/v1", "", "gpt-4o-mini")],
             ..AppConfig::default()
         };
 
-        assert!(validate_active_provider(&ollama).is_err());
-        assert!(validate_active_provider(&custom_http).is_err());
+        let error = validate_active_provider(&openai).expect_err("a key is required");
+        assert!(error.contains("API key"), "got: {error}");
+    }
+
+    #[test]
+    fn every_provider_needs_a_base_url_and_all_but_deeplx_need_a_model() {
+        for name in ["openai", "ollama", "gemini", "claude"] {
+            let no_model = AppConfig {
+                active_provider: name.to_string(),
+                providers: vec![provider(name, "http://127.0.0.1:1/v1", "", "")],
+                ..AppConfig::default()
+            };
+            let error = validate_active_provider(&no_model).expect_err("a model is required");
+            assert!(error.contains("model"), "{name} gave: {error}");
+        }
+
+        let deeplx = AppConfig {
+            active_provider: "deeplx".to_string(),
+            providers: vec![provider("deeplx", "http://127.0.0.1:1188", "", "")],
+            ..AppConfig::default()
+        };
+        assert!(validate_active_provider(&deeplx).is_ok());
+
+        let no_url = AppConfig {
+            active_provider: "ollama".to_string(),
+            providers: vec![provider("ollama", "", "", "m")],
+            ..AppConfig::default()
+        };
+        let error = validate_active_provider(&no_url).expect_err("a base URL is required");
+        assert!(error.contains("base URL"), "got: {error}");
+    }
+
+    /// `custom_http` was removed. A config still naming it must be reported, not
+    /// quietly treated as ready or silently rerouted to a different service.
+    #[test]
+    fn a_removed_provider_is_reported_as_unknown() {
+        let config = AppConfig {
+            active_provider: "custom_http".to_string(),
+            providers: vec![provider("custom_http", "http://127.0.0.1:8080/translate", "", "")],
+            ..AppConfig::default()
+        };
+
+        let error = validate_active_provider(&config).expect_err("custom_http no longer exists");
+        assert!(error.contains("Unknown provider"), "got: {error}");
+        assert!(
+            error.contains("openai") && error.contains("deeplx"),
+            "the message should name what is supported: {error}"
+        );
+    }
+
+    /// Every provider the defaults ship must actually be usable, or the app
+    /// starts up with a provider it cannot build.
+    #[test]
+    fn the_default_config_only_lists_supported_providers() {
+        for provider in AppConfig::default().providers {
+            assert!(
+                crate::translate::SUPPORTED_PROVIDERS.contains(&provider.name.as_str()),
+                "{} is shipped but not supported",
+                provider.name
+            );
+        }
     }
 
     /// A config on disk is the user's only copy of their API keys, so writes and
@@ -760,6 +922,158 @@ mod tests {
             let mut config = AppConfig::default();
             config.providers[0].api_key = key.to_string();
             config
+        }
+
+        /// The regression this guards: a config naming a provider that no longer
+        /// exists must be reported, not silently dropped and not silently
+        /// rerouted to a different service.
+        #[test]
+        fn a_removed_provider_entry_is_dropped_with_a_notice() {
+            let dir = TempDir::new("removed-provider");
+            let path = dir.path();
+            fs::write(
+                &path,
+                r#"{
+                    "version": 2,
+                    "enabled": true,
+                    "sourceLang": "auto",
+                    "targetLang": "zh",
+                    "activeProvider": "openai",
+                    "providers": [
+                        { "name": "openai", "baseUrl": "https://api.openai.com/v1", "apiKey": "sk-a", "model": "m" },
+                        { "name": "custom_http", "baseUrl": "http://127.0.0.1:8080/t", "apiKey": "", "model": "" }
+                    ]
+                }"#,
+            )
+            .expect("write");
+
+            let loaded = load_config_from(&path);
+
+            assert!(loaded.problem.is_none());
+            assert_eq!(
+                loaded.config.providers.len(),
+                1,
+                "custom_http should have been dropped"
+            );
+            assert_eq!(loaded.config.providers[0].name, "openai");
+            assert_eq!(loaded.notices.len(), 1);
+            assert!(
+                loaded.notices[0].contains("custom_http"),
+                "the notice must name what was removed: {}",
+                loaded.notices[0]
+            );
+        }
+
+        /// Ollama is reached over its OpenAI-compatible endpoint now, so an old
+        /// native base URL would be asked for a path that does not exist.
+        #[test]
+        fn an_ollama_base_url_gains_the_v1_path() {
+            let dir = TempDir::new("ollama-url");
+            let path = dir.path();
+            fs::write(
+                &path,
+                r#"{
+                    "version": 1,
+                    "enabled": true,
+                    "source_lang": "auto",
+                    "target_lang": "zh",
+                    "active_provider": "ollama",
+                    "providers": [
+                        { "name": "ollama", "base_url": "http://127.0.0.1:11434", "api_key": "", "model": "llama3" }
+                    ]
+                }"#,
+            )
+            .expect("write");
+
+            let loaded = load_config_from(&path);
+
+            assert_eq!(
+                loaded.config.providers[0].base_url,
+                "http://127.0.0.1:11434/v1"
+            );
+            assert!(
+                loaded.notices.iter().any(|notice| notice.contains("/v1")),
+                "the change must be reported: {:?}",
+                loaded.notices
+            );
+        }
+
+        #[test]
+        fn an_ollama_base_url_already_pointing_at_v1_is_left_alone() {
+            let dir = TempDir::new("ollama-url-current");
+            let path = dir.path();
+            fs::write(
+                &path,
+                r#"{
+                    "version": 2,
+                    "enabled": true,
+                    "sourceLang": "auto",
+                    "targetLang": "zh",
+                    "activeProvider": "ollama",
+                    "providers": [
+                        { "name": "ollama", "baseUrl": "http://192.168.1.9:11434/v1/", "apiKey": "", "model": "m" }
+                    ]
+                }"#,
+            )
+            .expect("write");
+
+            let loaded = load_config_from(&path);
+
+            assert_eq!(
+                loaded.config.providers[0].base_url,
+                "http://192.168.1.9:11434/v1/"
+            );
+            assert!(
+                loaded.notices.is_empty(),
+                "nothing changed, so nothing to report: {:?}",
+                loaded.notices
+            );
+        }
+
+        #[test]
+        fn a_current_config_produces_no_notices() {
+            let dir = TempDir::new("no-notices");
+            let path = dir.path();
+            save_config_to(&path, &AppConfig::default()).expect("save");
+
+            let loaded = load_config_from(&path);
+
+            assert!(loaded.problem.is_none());
+            assert!(
+                loaded.notices.is_empty(),
+                "unexpected notices: {:?}",
+                loaded.notices
+            );
+        }
+
+        /// A `null` extra_params parses fine but the merge step skips it, which
+        /// silently dropped the seeded defaults for anything created that way.
+        #[test]
+        fn a_null_extra_params_becomes_an_empty_object() {
+            let dir = TempDir::new("null-extra-params");
+            let path = dir.path();
+            fs::write(
+                &path,
+                r#"{
+                    "version": 2,
+                    "enabled": true,
+                    "sourceLang": "auto",
+                    "targetLang": "zh",
+                    "activeProvider": "openai",
+                    "providers": [
+                        { "name": "openai", "baseUrl": "https://api.openai.com/v1", "apiKey": "sk-a", "model": "m", "extraParams": null }
+                    ]
+                }"#,
+            )
+            .expect("write");
+
+            let loaded = load_config_from(&path);
+
+            assert_eq!(
+                loaded.config.providers[0].extra_params,
+                serde_json::json!({}),
+                "null must be normalised, not left for the merge step to skip"
+            );
         }
 
         #[test]

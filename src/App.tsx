@@ -57,8 +57,8 @@ const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI Compatible",
   gemini: "Google Gemini",
   claude: "Anthropic Claude",
+  // Local, and reached over Ollama's OpenAI-compatible endpoint.
   ollama: "Ollama (Local)",
-  custom_http: "Custom HTTP",
 };
 
 const LLM_PROVIDERS = new Set(["openai", "gemini", "claude", "ollama"]);
@@ -965,6 +965,27 @@ export default function App() {
                                 </Show>
                               </div>
                             )}
+                          </Show>
+
+                          {/* Changes made while reading the settings file. Not an
+                              error, but not something to make the user infer
+                              either: a provider entry that disappeared or a URL
+                              that was rewritten must say so. */}
+                          <Show when={diag().configNotices.length > 0}>
+                            <div class="p-4 rounded-lg border border-sky-300 dark:border-sky-800 bg-sky-50 dark:bg-sky-900/30">
+                              <div class="text-sm font-medium text-sky-800 dark:text-sky-200">
+                                Your settings were updated
+                              </div>
+                              <ul class="mt-2 space-y-1">
+                                <For each={diag().configNotices}>
+                                  {(notice) => (
+                                    <li class="text-xs text-sky-700 dark:text-sky-300">
+                                      {notice}
+                                    </li>
+                                  )}
+                                </For>
+                              </ul>
+                            </div>
                           </Show>
 
                           <div class="p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">

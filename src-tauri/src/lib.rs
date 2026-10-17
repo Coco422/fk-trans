@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, PhysicalPosition};
 use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout, Duration};
-use translate::provider::TranslateError;
 use translate::TranslationEngine;
 
 const POPUP_CURSOR_OFFSET_X: f64 = 14.0;
@@ -52,6 +51,10 @@ pub struct AppState {
     /// Set when the config file could not be read at startup. Without this the
     /// app looks like it simply forgot the user's settings.
     pub config_load_problem: Option<config::ConfigLoadProblem>,
+    /// Changes made while loading the config, e.g. a provider entry that no
+    /// longer exists. Reported in Diagnostics so a migration is not mistaken for
+    /// the app rewriting settings on its own.
+    pub config_notices: Vec<String>,
 }
 
 /// Releases the pipeline gate when the run ends, however it ends.
@@ -195,15 +198,6 @@ fn text_hash(text: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
-}
-
-fn translate_error_kind(error: &TranslateError) -> &'static str {
-    match error {
-        TranslateError::Network(_) => "network",
-        TranslateError::Api(_) => "api",
-        TranslateError::RateLimited => "rate_limited",
-        TranslateError::Config(_) => "config",
-    }
 }
 
 fn apply_log_level(debug_logging: bool) {
@@ -423,14 +417,13 @@ async fn run_translation_pipeline(
             );
             emit_mouse_trigger_state(&app);
         }
-        Err(e) => {
-            let error_kind = translate_error_kind(&e);
-            log::error!("[pipeline] Translation error kind={}", error_kind);
-            let _ = app.emit("translation-error", e.to_string());
+        Err(error) => {
+            log::error!("[pipeline] Translation error kind={}", error.kind());
+            let _ = app.emit("translation-error", error.to_string());
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
                 "Failed: translation error",
-                Some(format!("Translation error kind: {}", error_kind)),
+                Some(format!("Translation error kind: {}", error.kind())),
             );
             emit_mouse_trigger_state(&app);
         }
@@ -482,6 +475,7 @@ pub fn run() {
             let config::ConfigLoad {
                 config,
                 problem: config_load_problem,
+                notices: config_notices,
             } = config::load_config();
             apply_log_level(config.debug_logging);
             log::info!(
@@ -514,6 +508,7 @@ pub fn run() {
                 mouse_trigger_state: mouse_trigger_state.clone(),
                 pipeline_gate: pipeline_gate.clone(),
                 config_load_problem,
+                config_notices,
             });
 
             // Create system tray

@@ -41,6 +41,10 @@ pub struct DiagnosticsSnapshot {
     /// Set when the config file could not be read at startup, so the settings UI
     /// can explain why everything looks like a fresh install.
     pub config_load_problem: Option<ConfigLoadProblem>,
+    /// Changes made while loading the config, e.g. a provider entry that is no
+    /// longer supported. Shown so a migration is not mistaken for the app
+    /// rewriting the user's settings on its own.
+    pub config_notices: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -234,6 +238,7 @@ pipeline_gate:
 
 config_file:
   problem: {}
+  notices: {}
 
 provider_readiness:
   active_provider_ready: {}
@@ -264,6 +269,16 @@ recent_logs:
         gate_held_for_ms,
         gate_note,
         describe_config_problem(snapshot.config_load_problem.as_ref()),
+        if snapshot.config_notices.is_empty() {
+            "none".to_string()
+        } else {
+            snapshot
+                .config_notices
+                .iter()
+                .map(|notice| format!("  - {notice}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
         snapshot.active_provider_ready,
         snapshot.active_provider_reason.as_deref().unwrap_or("none"),
         provider_lines,
@@ -313,6 +328,7 @@ fn current_snapshot(app: &AppHandle, state: &AppState) -> DiagnosticsSnapshot {
         active_provider_reason: active_readiness.err(),
         providers: provider_diagnostics(&config),
         config_load_problem: state.config_load_problem.clone(),
+        config_notices: state.config_notices.clone(),
     }
 }
 

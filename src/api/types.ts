@@ -39,7 +39,13 @@ logMaxFileSizeBytes: number, logRotationKeepFiles: number, accessibilityTrusted:
  * Set when the config file could not be read at startup, so the settings UI
  * can explain why everything looks like a fresh install.
  */
-configLoadProblem: ConfigLoadProblem | null, };
+configLoadProblem: ConfigLoadProblem | null, 
+/**
+ * Changes made while loading the config, e.g. a provider entry that is no
+ * longer supported. Shown so a migration is not mistaken for the app
+ * rewriting the user's settings on its own.
+ */
+configNotices: Array<string>, };
 
 export type ExportedDiagnostics = { path: string, };
 

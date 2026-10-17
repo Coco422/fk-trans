@@ -35,11 +35,39 @@ in sync, so prefer AppKit-native behaviour over portable-looking indirection.
 - `clipboard::pasteboard::Pasteboard` is the seam for pasteboard access. Tests use
   an in-memory fake; the macOS backend serialises access behind a process-wide
   lock because AppKit's pasteboard segfaults under concurrent access.
-- `translate::http` owns the shared HTTP client and its timeouts.
+- `translate::http` owns the shared HTTP client, its timeouts, the status-to-error
+  mapping, and response parsing helpers. Every provider goes through `send()`, so
+  no provider can echo an upstream body into a user-visible error.
+- `translate::prompt` is the only prompt formatter, and `translate::language`
+  is the only place a language code becomes a name or a BCP-47 code. Prompts ask
+  for the form they need (`{to}`, `{to_name}`, `{to_code}`) instead of each
+  provider mapping codes itself.
+- Providers are `openai` (any OpenAI-compatible endpoint, including Ollama),
+  `claude`, `gemini`, `deeplx`. Ollama is a *preset* of `openai`, not an
+  implementation: its `/v1/chat/completions` is compatible, and `reasoning_effort`
+  controls thinking. See `docs/local-models.md`.
+- An unknown provider name is an error. It used to fall through to
+  `api.openai.com`, silently sending the user's text to a service they had not
+  configured.
 - `config` writes atomically via a sibling temp file + rename, at mode 0600
   (the file holds API keys in plain text). A config that fails to parse is moved
   aside, reported through `AppState::config_load_problem`, and shown in
-  Diagnostics — never silently replaced with defaults.
+  Diagnostics — never silently replaced with defaults. Changes made while loading
+  (a removed provider, a rewritten URL) go through `ConfigLoad::notices` and are
+  shown too, because a migration the user cannot see is indistinguishable from
+  the app editing their settings.
+
+## Changing a Provider
+
+Anything request-shaped a preset needs goes in that entry's `extra_params` — it
+is merged into the request body. Do not bake a provider-specific flag into the
+base body: it is sent to every endpoint, including ones that have never heard of
+it. `chat_template_kwargs.enable_thinking = false`, for example, is a vLLM flag
+and belongs in the vLLM entry's `extra_params`.
+
+A response that parses but contains no translation is an error, never
+`.unwrap_or("")`. An empty success renders as a blank popup with nothing to act
+on.
 
 ## Useful Checks
 

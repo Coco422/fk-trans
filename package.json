@@ -8,7 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "serve": "vite preview",
-    "gen:types": "cargo test --offline --manifest-path src-tauri/Cargo.toml --lib -- export_bindings",
+    "gen:types": "cd src-tauri && TS_RS_EXPORT_DIR=../src/api cargo test --offline --lib -- export_bindings",
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm run build -- --mode development",
     "tauri": "tauri",

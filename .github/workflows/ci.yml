@@ -42,10 +42,24 @@ jobs:
       # Regenerates src/api/types.ts from the Rust structs. A diff means the
       # generated types were not committed alongside the Rust change they came
       # from, which is exactly the drift this codegen exists to prevent.
-      # The export tests also write into src/api, so this only works on macOS.
+      # The export tests only run on macOS.
       - name: Generated types are up to date
         run: |
+          target=src/api/types.ts
+          before=$(stat -f %m "$target")
+
           npm run gen:types
+
+          # ts-rs rewrites the file unconditionally, so an unchanged timestamp
+          # means it wrote somewhere else — and the diff below would then pass on
+          # a stale file. This check exists because that happened: TS_RS_EXPORT_DIR
+          # resolved one directory too high and the drift guard stayed green.
+          after=$(stat -f %m "$target")
+          if [ "$before" = "$after" ]; then
+            echo "::error::$target was not rewritten. TS_RS_EXPORT_DIR is not resolving to src/api."
+            exit 1
+          fi
+
           # `git add` first, then compare against HEAD: a plain `git diff` does
           # not see an untracked file, so it would pass on a fresh checkout even
           # if the generated file had never been committed.

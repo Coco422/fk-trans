@@ -19,10 +19,25 @@ pub enum TranslateError {
     Network(String),
     #[error("API error: {0}")]
     Api(String),
-    #[error("Rate limited")]
-    RateLimited,
+    #[error("Rate limited: {0}")]
+    RateLimited(String),
     #[error("Invalid configuration: {0}")]
     Config(String),
+}
+
+impl TranslateError {
+    /// A stable label for diagnostics and reporting.
+    ///
+    /// This match used to be written out twice, verbatim, in `lib.rs` and
+    /// `commands/settings.rs`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Network(_) => "network",
+            Self::Api(_) => "api",
+            Self::RateLimited(_) => "rate_limited",
+            Self::Config(_) => "config",
+        }
+    }
 }
 
 #[async_trait::async_trait]

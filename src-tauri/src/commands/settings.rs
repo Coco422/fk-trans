@@ -1,25 +1,8 @@
-use crate::translate::claude::ClaudeProvider;
-use crate::translate::custom_http::CustomHttpProvider;
-use crate::translate::deeplx::DeepLXProvider;
-use crate::translate::gemini::GeminiProvider;
-use crate::translate::ollama::OllamaProvider;
-use crate::translate::openai_compat::OpenAICompatProvider;
-use crate::translate::provider::{TranslateError, TranslateProvider};
 use crate::{
     config::{self, ProviderConfig},
     AppState,
 };
-use std::sync::Arc;
 use tauri::State;
-
-fn translate_error_kind(error: &TranslateError) -> &'static str {
-    match error {
-        TranslateError::Network(_) => "network",
-        TranslateError::Api(_) => "api",
-        TranslateError::RateLimited => "rate_limited",
-        TranslateError::Config(_) => "config",
-    }
-}
 
 #[tauri::command]
 pub async fn get_config(state: State<'_, AppState>) -> Result<config::AppConfig, String> {
@@ -50,7 +33,7 @@ pub async fn update_config(
     // is now a field access rather than a string lookup.
     if patch.active_provider.is_some() {
         let mut engine = state.translation_engine.write().await;
-        engine.set_active_provider(&result.active_provider);
+        engine.set_active_provider(&result.active_provider).await;
     }
     if patch.mouse_trigger_button.is_some() {
         crate::mouse::listener::set_trigger_button(
@@ -166,7 +149,12 @@ pub async fn update_provider(
     );
 
     let mut engine = state.translation_engine.write().await;
-    engine.reload_provider(&provider_cfg);
+    // The config is saved either way, but a provider the engine cannot build is
+    // reported rather than silently left running the previous settings.
+    engine
+        .reload_provider(&provider_cfg)
+        .await
+        .map_err(|error| error.to_string())?;
 
     Ok(())
 }
@@ -198,54 +186,22 @@ pub async fn test_provider(
         !provider_config.model.trim().is_empty()
     );
 
-    let provider: Arc<dyn TranslateProvider> = match provider_name.as_str() {
-        "deeplx" => Arc::new(DeepLXProvider::new()),
-        "openai" => Arc::new(OpenAICompatProvider::new(
-            &provider_config.base_url,
-            &provider_config.api_key,
-            &provider_config.model,
-            &provider_config.system_prompt,
-            &provider_config.user_prompt,
-            provider_config.extra_params.clone(),
-        )),
-        "gemini" => Arc::new(GeminiProvider::new(
-            &provider_config.base_url,
-            &provider_config.api_key,
-            &provider_config.model,
-            &provider_config.system_prompt,
-            &provider_config.user_prompt,
-        )),
-        "claude" => Arc::new(ClaudeProvider::new(
-            &provider_config.base_url,
-            &provider_config.api_key,
-            &provider_config.model,
-            &provider_config.system_prompt,
-            &provider_config.user_prompt,
-        )),
-        "ollama" => Arc::new(OllamaProvider::new(
-            &provider_config.base_url,
-            &provider_config.model,
-            &provider_config.system_prompt,
-            &provider_config.user_prompt,
-        )),
-        "custom_http" => Arc::new(CustomHttpProvider::new(
-            &provider_config.base_url,
-            &provider_config.api_key,
-            std::collections::HashMap::new(),
-        )),
-        _ => return Err(format!("Unknown provider: {}", provider_name)),
-    };
+    // Build the provider the same way the engine does. This used to be a second
+    // copy of the dispatch match, so adding a provider meant editing two places
+    // and testing one of them could exercise a different code path than the app.
+    let provider = crate::translate::build_provider(&provider_config)
+        .map_err(|error| error.to_string())?;
 
     let result = provider
         .translate("Hello, world!", "en", "zh")
         .await
-        .map_err(|e| {
+        .map_err(|error| {
             log::warn!(
                 "[provider] Test failed provider={} error_kind={}",
                 provider_name,
-                translate_error_kind(&e)
+                error.kind()
             );
-            e.to_string()
+            error.to_string()
         })?;
 
     log::info!(
