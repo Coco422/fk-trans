@@ -89,4 +89,11 @@ export type TranslateResult = { original: string, translated: string, sourceLang
  */
 export type TranslationReadyPayload = { original: string, result: TranslateResult, };
 
+/**
+ * What started a translation.
+ *
+ * Lives here rather than next to the mouse listener because it is not only
+ * mouse events that produce one — a keyboard shortcut and the diagnostics test
+ * do too.
+ */
 export type TriggerSource = "mouseMiddle" | "mouseSelection" | "keyboardShortcut" | "test";

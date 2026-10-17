@@ -24,12 +24,13 @@ mod trigger;
 use config::AppConfig;
 use history::HistoryStore;
 use macos::ax::ScreenRect;
-use mouse::listener::{MouseTriggerEvent, TriggerSource};
+use mouse::listener::MouseTriggerEvent;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, PhysicalPosition};
 use tokio::sync::RwLock;
 use translate::TranslationEngine;
 use trigger::placement::{self, Point, Size};
+use trigger::TriggerSource;
 
 /// Distance between the popup and whatever it is anchored to.
 const POPUP_GAP: f64 = 10.0;
@@ -610,25 +611,20 @@ pub fn run() {
                 match rx.recv() {
                     Ok(event) => {
                         log::info!(
-                            "[mouse] Event delivered to pipeline receiver: button={} trigger={} source={:?} ts={}",
+                            "[mouse] Event delivered to pipeline receiver: button={} trigger={:?} ts={}",
                             event.button,
-                            event.is_trigger,
-                            event.source,
+                            event.trigger,
                             event.timestamp_ms
                         );
                         let app = app_handle_clone.clone();
                         emit_mouse_trigger_state(&app);
-                        if !event.is_trigger {
+
+                        let Some(source) = event.trigger else {
                             continue;
-                        }
+                        };
                         let cm = clipboard_clone.clone();
                         let gate = mouse_pipeline_gate.clone();
-                        tauri::async_runtime::spawn(run_translation_pipeline(
-                            app,
-                            cm,
-                            gate,
-                            event.source,
-                        ));
+                        tauri::async_runtime::spawn(run_translation_pipeline(app, cm, gate, source));
                     }
                     Err(e) => {
                         log::error!("Channel error: {}", e);
