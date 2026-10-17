@@ -1,8 +1,32 @@
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Format version of `config.json`.
+///
+/// 1. snake_case keys.
+/// 2. camelCase keys, matching the IPC wire format.
+pub const CURRENT_CONFIG_VERSION: u32 = 2;
+
+fn default_config_version() -> u32 {
+    1
+}
+
+/// `extra_params` is merged into the request body, so it has to be an object.
+///
+/// `#[serde(default)]` on a `serde_json::Value` yields `Null`, not `{}`. A
+/// provider created through `update_provider` therefore ended up with `null`,
+/// `merge_extra_params` skipped it as a non-object, and the seeded defaults —
+/// including the `chat_template_kwargs.enable_thinking = false` that vLLM and
+/// Qwen need — were silently dropped.
+pub fn default_extra_params() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct ProviderConfig {
     pub name: String,
     pub base_url: String,
@@ -12,7 +36,8 @@ pub struct ProviderConfig {
     pub system_prompt: String,
     #[serde(default = "default_user_prompt")]
     pub user_prompt: String,
-    #[serde(default)]
+    #[serde(default = "default_extra_params")]
+    #[ts(type = "Record<string, unknown>")]
     pub extra_params: serde_json::Value,
 }
 
@@ -24,8 +49,13 @@ pub fn default_user_prompt() -> String {
     "{text}".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct AppConfig {
+    /// Set when the file is loaded; see [`CURRENT_CONFIG_VERSION`].
+    #[serde(default = "default_config_version")]
+    pub version: u32,
     pub enabled: bool,
     #[serde(default)]
     pub debug_logging: bool,
@@ -35,12 +65,100 @@ pub struct AppConfig {
     pub target_lang: String,
     pub active_provider: String,
     #[serde(default = "default_mouse_trigger_button")]
+    #[ts(type = "number")]
     pub mouse_trigger_button: i64,
     pub providers: Vec<ProviderConfig>,
 }
 
 pub fn default_mouse_trigger_button() -> i64 {
     2
+}
+
+/// A partial update to [`AppConfig`].
+///
+/// This replaced a `serde_json::Value` whose keys were looked up by hand with
+/// `updates.get("source_lang")`. A misspelled or wrongly-cased key was a silent
+/// no-op that still reported success, so the settings UI could show a change the
+/// app had not made. A typed patch makes that a deserialization error, and
+/// `deny_unknown_fields` turns a stray key into an error rather than a shrug.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export, export_to = "types.ts")]
+pub struct ConfigPatch {
+    #[ts(optional)]
+    pub enabled: Option<bool>,
+    #[ts(optional)]
+    pub debug_logging: Option<bool>,
+    #[ts(optional)]
+    pub selection_trigger_enabled: Option<bool>,
+    #[ts(optional)]
+    pub source_lang: Option<String>,
+    #[ts(optional)]
+    pub target_lang: Option<String>,
+    #[ts(optional)]
+    pub active_provider: Option<String>,
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub mouse_trigger_button: Option<i64>,
+}
+
+/// The lowest mouse button number that may be bound to translation.
+///
+/// Button 0 is the left button. Binding it would make every click in every app
+/// also a translation request, so it is refused rather than accepted and then
+/// never matched.
+pub const MIN_TRIGGER_BUTTON: i64 = 1;
+pub const MAX_TRIGGER_BUTTON: i64 = 31;
+
+impl ConfigPatch {
+    /// Apply to `config`, rejecting values that would leave the app in a state
+    /// where it cannot work — a bound mouse button that never matches, or a
+    /// provider that does not exist.
+    pub fn apply_to(&self, config: &mut AppConfig) -> Result<(), String> {
+        if let Some(enabled) = self.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(debug_logging) = self.debug_logging {
+            config.debug_logging = debug_logging;
+        }
+        if let Some(selection_trigger_enabled) = self.selection_trigger_enabled {
+            config.selection_trigger_enabled = selection_trigger_enabled;
+        }
+        if let Some(lang) = &self.source_lang {
+            config.source_lang = require_language_code(lang, "Source language")?;
+        }
+        if let Some(lang) = &self.target_lang {
+            config.target_lang = require_language_code(lang, "Target language")?;
+        }
+        if let Some(provider) = &self.active_provider {
+            if !config
+                .providers
+                .iter()
+                .any(|candidate| &candidate.name == provider)
+            {
+                return Err(format!("Unknown provider: {provider}"));
+            }
+            config.active_provider = provider.clone();
+        }
+        if let Some(button) = self.mouse_trigger_button {
+            if !(MIN_TRIGGER_BUTTON..=MAX_TRIGGER_BUTTON).contains(&button) {
+                return Err(format!(
+                    "Trigger button must be between {MIN_TRIGGER_BUTTON} and {MAX_TRIGGER_BUTTON} \
+                     (0 is the left button); got {button}"
+                ));
+            }
+            config.mouse_trigger_button = button;
+        }
+        Ok(())
+    }
+}
+
+fn require_language_code(value: &str, field: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field} cannot be empty"));
+    }
+    Ok(trimmed.to_string())
 }
 
 pub fn default_selection_trigger_enabled() -> bool {
@@ -50,6 +168,7 @@ pub fn default_selection_trigger_enabled() -> bool {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            version: CURRENT_CONFIG_VERSION,
             enabled: true,
             debug_logging: false,
             selection_trigger_enabled: default_selection_trigger_enabled(),
@@ -176,7 +295,9 @@ pub fn validate_active_provider(config: &AppConfig) -> Result<(), String> {
 /// Why the config file could not be used. Kept after loading so diagnostics can
 /// say what happened, instead of the app silently showing defaults and looking
 /// like the user's settings reset themselves.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct ConfigLoadProblem {
     pub path: String,
     pub kind: ConfigLoadProblemKind,
@@ -185,8 +306,9 @@ pub struct ConfigLoadProblem {
     pub backup_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub enum ConfigLoadProblemKind {
     /// The config directory or file could not be read at all.
     Unreadable,
@@ -251,9 +373,21 @@ pub fn load_config_from(path: &Path) -> ConfigLoad {
         }
     };
 
-    match serde_json::from_str::<AppConfig>(&json) {
-        Ok(config) => {
+    match crate::compat::from_str_compat::<AppConfig>(&json) {
+        Ok(mut config) => {
             tighten_config_permissions(path);
+            if config.version < CURRENT_CONFIG_VERSION {
+                log::info!(
+                    "[config] Migrating {} from format v{} to v{}; it will be written back in the new format on the next save",
+                    path.display(),
+                    config.version,
+                    CURRENT_CONFIG_VERSION
+                );
+            }
+            // In memory the config is always the current format, so any save
+            // writes the current format without every caller having to know.
+            config.version = CURRENT_CONFIG_VERSION;
+            normalize_extra_params(&mut config, path);
             ConfigLoad {
                 config,
                 problem: None,
@@ -299,6 +433,22 @@ fn backup_unreadable_config(path: &Path) -> Option<String> {
         Err(error) => {
             log::error!("[config] Could not preserve the unreadable config: {}", error);
             None
+        }
+    }
+}
+
+/// An explicit `null` survives `serde(default)`, so configs written by earlier
+/// builds can still carry one. Treat it as "no extra params" rather than leaving
+/// a value that the merge step skips.
+fn normalize_extra_params(config: &mut AppConfig, path: &Path) {
+    for provider in &mut config.providers {
+        if provider.extra_params.is_null() {
+            log::info!(
+                "[config] {}: provider '{}' had null extra_params, treating it as empty",
+                path.display(),
+                provider.name
+            );
+            provider.extra_params = default_extra_params();
         }
     }
 }
@@ -427,8 +577,11 @@ mod tests {
         assert!(config.selection_trigger_enabled);
     }
 
+    /// A file from an older build: snake_case keys and no `mouseTriggerButton`.
+    /// It has to go through the compat reader, which is the only place allowed
+    /// to accept the old spellings.
     #[test]
-    fn legacy_config_without_mouse_trigger_button_uses_default() {
+    fn a_legacy_config_without_mouse_trigger_button_uses_the_default() {
         let json = r#"{
             "enabled": true,
             "source_lang": "auto",
@@ -437,11 +590,30 @@ mod tests {
             "providers": []
         }"#;
 
-        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let config: AppConfig = crate::compat::from_str_compat(json).unwrap();
 
         assert_eq!(config.mouse_trigger_button, 2);
         assert!(!config.debug_logging);
         assert!(config.selection_trigger_enabled);
+        assert_eq!(config.source_lang, "auto");
+    }
+
+    /// The struct itself must not accept the old spellings: on the IPC path a
+    /// snake_case key has to be a hard error, not something silently honoured.
+    #[test]
+    fn the_current_struct_rejects_legacy_keys() {
+        let json = r#"{
+            "enabled": true,
+            "source_lang": "auto",
+            "target_lang": "zh",
+            "active_provider": "openai",
+            "providers": []
+        }"#;
+
+        assert!(
+            serde_json::from_str::<AppConfig>(json).is_err(),
+            "only compat::from_str_compat may accept snake_case keys"
+        );
     }
 
     #[test]
@@ -454,6 +626,12 @@ mod tests {
         };
 
         let json = serde_json::to_string(&config).unwrap();
+        // The wire and on-disk format is camelCase, and only camelCase.
+        assert!(json.contains("\"mouseTriggerButton\":4"), "got {json}");
+        assert!(json.contains("\"debugLogging\":true"), "got {json}");
+        assert!(!json.contains("mouse_trigger_button"));
+        assert_eq!(config.version, CURRENT_CONFIG_VERSION);
+
         let loaded: AppConfig = serde_json::from_str(&json).unwrap();
 
         assert_eq!(loaded.mouse_trigger_button, 4);
@@ -680,6 +858,82 @@ mod tests {
             );
         }
 
+        /// The wire and on-disk format is camelCase. Files written by earlier
+        /// versions are snake_case, and config.json is the only copy of the
+        /// user's API keys — a rename that silently failed to read them would be
+        /// data loss, not a cosmetic change.
+        #[test]
+        fn a_config_written_in_the_old_snake_case_format_still_loads() {
+            let dir = TempDir::new("legacy-keys");
+            let path = dir.path();
+            fs::write(
+                &path,
+                r#"{
+                    "enabled": true,
+                    "debug_logging": false,
+                    "selection_trigger_enabled": true,
+                    "source_lang": "auto",
+                    "target_lang": "zh",
+                    "active_provider": "openai",
+                    "mouse_trigger_button": 2,
+                    "providers": [{
+                        "name": "openai",
+                        "base_url": "https://example.test/v1",
+                        "api_key": "sk-legacy",
+                        "model": "gpt-4o-mini",
+                        "system_prompt": "sys",
+                        "user_prompt": "{text}",
+                        "extra_params": {}
+                    }]
+                }"#,
+            )
+            .expect("write");
+
+            let loaded = load_config_from(&path);
+
+            assert!(loaded.problem.is_none(), "a legacy file is not a problem");
+            assert_eq!(loaded.config.providers[0].api_key, "sk-legacy");
+            assert_eq!(loaded.config.providers[0].base_url, "https://example.test/v1");
+            assert_eq!(loaded.config.active_provider, "openai");
+        }
+
+        /// And a file already in the current format loads without going through
+        /// the alias path.
+        #[test]
+        fn a_config_in_the_current_format_loads() {
+            let dir = TempDir::new("current-format");
+            let path = dir.path();
+            fs::write(
+                &path,
+                r#"{
+                    "enabled": true,
+                    "debugLogging": false,
+                    "selectionTriggerEnabled": true,
+                    "sourceLang": "auto",
+                    "targetLang": "ja",
+                    "activeProvider": "claude",
+                    "mouseTriggerButton": 2,
+                    "providers": [{
+                        "name": "claude",
+                        "baseUrl": "https://api.anthropic.com",
+                        "apiKey": "sk-current",
+                        "model": "claude-haiku-4-5",
+                        "systemPrompt": "sys",
+                        "userPrompt": "{text}",
+                        "extraParams": {}
+                    }]
+                }"#,
+            )
+            .expect("write");
+
+            let loaded = load_config_from(&path);
+
+            assert!(loaded.problem.is_none());
+            assert_eq!(loaded.config.providers[0].api_key, "sk-current");
+            assert_eq!(loaded.config.target_lang, "ja");
+            assert_eq!(loaded.config.active_provider, "claude");
+        }
+
         #[test]
         fn a_missing_config_is_a_first_run_not_a_problem() {
             let dir = TempDir::new("missing");
@@ -735,6 +989,159 @@ mod tests {
                 "sk-keep-me",
                 "the previous config must still be there after a failed save"
             );
+        }
+    }
+
+    /// `update_config` used to take a `serde_json::Value` and look keys up by
+    /// hand, so a misspelled key was a silent no-op that still reported success.
+    mod patch {
+        use super::*;
+
+        fn base() -> AppConfig {
+            AppConfig::default()
+        }
+
+        #[test]
+        fn an_empty_patch_leaves_the_config_alone() {
+            let mut config = base();
+            let before = serde_json::to_string(&config).unwrap();
+
+            ConfigPatch::default().apply_to(&mut config).expect("apply");
+
+            assert_eq!(serde_json::to_string(&config).unwrap(), before);
+        }
+
+        #[test]
+        fn only_the_fields_present_are_changed() {
+            let mut config = base();
+            config.source_lang = "auto".to_string();
+            config.target_lang = "zh".to_string();
+
+            ConfigPatch {
+                target_lang: Some("ja".to_string()),
+                ..ConfigPatch::default()
+            }
+            .apply_to(&mut config)
+            .expect("apply");
+
+            assert_eq!(config.target_lang, "ja");
+            assert_eq!(config.source_lang, "auto", "untouched field must survive");
+        }
+
+        #[test]
+        fn language_codes_are_trimmed_and_must_not_be_empty() {
+            let mut config = base();
+
+            ConfigPatch {
+                source_lang: Some("  en  ".to_string()),
+                ..ConfigPatch::default()
+            }
+            .apply_to(&mut config)
+            .expect("apply");
+            assert_eq!(config.source_lang, "en");
+
+            let error = ConfigPatch {
+                target_lang: Some("   ".to_string()),
+                ..ConfigPatch::default()
+            }
+            .apply_to(&mut config)
+            .expect_err("a blank language must be refused");
+            assert!(error.contains("Target language"), "got: {error}");
+        }
+
+        /// A trigger button that no mouse produces used to be accepted and then
+        /// simply never matched, leaving the user with an app that did nothing.
+        #[test]
+        fn an_out_of_range_trigger_button_is_refused() {
+            let mut config = base();
+
+            for button in [0, -1, MAX_TRIGGER_BUTTON + 1, 99] {
+                let error = ConfigPatch {
+                    mouse_trigger_button: Some(button),
+                    ..ConfigPatch::default()
+                }
+                .apply_to(&mut config)
+                .expect_err("should be refused");
+                assert!(
+                    error.contains("Trigger button"),
+                    "button {button} gave: {error}"
+                );
+                assert_eq!(config.mouse_trigger_button, 2, "config must be untouched");
+            }
+        }
+
+        /// Button 0 is the left button; binding it would make every click in
+        /// every app fire a translation.
+        #[test]
+        fn the_left_button_cannot_be_bound() {
+            let mut config = base();
+            let error = ConfigPatch {
+                mouse_trigger_button: Some(0),
+                ..ConfigPatch::default()
+            }
+            .apply_to(&mut config)
+            .expect_err("refused");
+            assert!(error.contains("left button"), "got: {error}");
+        }
+
+        #[test]
+        fn a_provider_that_does_not_exist_is_refused() {
+            let mut config = base();
+
+            let error = ConfigPatch {
+                active_provider: Some("nope".to_string()),
+                ..ConfigPatch::default()
+            }
+            .apply_to(&mut config)
+            .expect_err("refused");
+
+            assert!(error.contains("Unknown provider"), "got: {error}");
+            assert_eq!(config.active_provider, "openai", "unchanged");
+        }
+
+        #[test]
+        fn a_known_provider_is_accepted() {
+            let mut config = base();
+            ConfigPatch {
+                active_provider: Some("claude".to_string()),
+                ..ConfigPatch::default()
+            }
+            .apply_to(&mut config)
+            .expect("apply");
+            assert_eq!(config.active_provider, "claude");
+        }
+
+        /// The whole point of the typed patch: a key that is not a field is an
+        /// error, not something quietly dropped.
+        #[test]
+        fn an_unknown_key_is_rejected() {
+            let error = serde_json::from_str::<ConfigPatch>(r#"{ "source_language": "ja" }"#)
+                .expect_err("unknown keys must not deserialize");
+            assert!(
+                error.to_string().contains("source_language"),
+                "got: {error}"
+            );
+        }
+
+        /// And the old snake_case spelling is not a field any more, on the IPC
+        /// path or anywhere else.
+        #[test]
+        fn legacy_snake_case_keys_are_rejected_on_the_wire() {
+            let error = serde_json::from_str::<ConfigPatch>(r#"{ "source_lang": "ja" }"#)
+                .expect_err("snake_case must not deserialize");
+            assert!(error.to_string().contains("source_lang"), "got: {error}");
+        }
+
+        #[test]
+        fn a_partial_patch_deserializes_from_camel_case_json() {
+            let patch: ConfigPatch = serde_json::from_str(
+                r#"{ "debugLogging": true, "mouseTriggerButton": 3 }"#,
+            )
+            .expect("deserialize");
+
+            assert_eq!(patch.debug_logging, Some(true));
+            assert_eq!(patch.mouse_trigger_button, Some(3));
+            assert_eq!(patch.target_lang, None);
         }
     }
 }

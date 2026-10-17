@@ -1,0 +1,14 @@
+# ts-rs exports TypeScript bindings when its tests run, i.e. during any
+# `cargo test`. Without this it defaults to a `src-tauri/bindings/` directory
+# nobody looks at, so a plain `cargo test` would leave a stale copy of the types
+# behind next to the real one.
+#
+# Set here rather than only in the npm script so that both entry points agree:
+# a bare `cargo test` and `npm run gen:types` write to the same file.
+#
+# This file sits at the repository root because cargo discovers config by walking
+# up from the *current* directory, so a config inside src-tauri/ would be missed
+# by `cargo test --manifest-path src-tauri/Cargo.toml` run from the root.
+# `relative = true` resolves against this file's directory.
+[env]
+TS_RS_EXPORT_DIR = { value = "../src/api", relative = true }

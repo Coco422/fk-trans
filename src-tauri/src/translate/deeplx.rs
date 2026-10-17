@@ -61,7 +61,6 @@ impl TranslateProvider for DeepLXProvider {
             source_lang: from.to_string(),
             target_lang: to.to_lowercase(),
             provider: "deeplx".into(),
-            alternatives: vec![],
         })
     }
 }

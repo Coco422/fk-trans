@@ -1,5 +1,6 @@
 mod clipboard;
 mod commands;
+mod compat;
 mod config;
 mod history;
 mod mouse;
@@ -25,6 +26,19 @@ const LOG_MAX_FILE_SIZE_BYTES: u64 = 512 * 1024;
 const LOG_ROTATION_KEEP_FILES: usize = 4;
 const CLIPBOARD_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 const SELECTION_CAPTURE_SETTLE_DELAY: Duration = Duration::from_millis(120);
+
+/// Payload of the `translation-ready` event.
+///
+/// A real struct rather than a `serde_json::json!` literal, so the generated
+/// TypeScript and the Rust side cannot drift. The cursor position used to be
+/// part of this and was never read — Rust positions the window itself.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
+pub struct TranslationReadyPayload {
+    pub original: String,
+    pub result: translate::provider::TranslateResult,
+}
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
@@ -397,12 +411,10 @@ async fn run_translation_pipeline(
 
             let _ = app.emit(
                 "translation-ready",
-                serde_json::json!({
-                    "original": text,
-                    "result": result,
-                    "cursor_x": cursor_pos.x,
-                    "cursor_y": cursor_pos.y,
-                }),
+                TranslationReadyPayload {
+                    original: text,
+                    result,
+                },
             );
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,

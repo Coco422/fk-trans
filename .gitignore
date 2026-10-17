@@ -5,3 +5,6 @@ src-tauri/target
 src-tauri/gen
 *.lock
 .DS_Store
+
+# ts-rs default output, should never be committed (see .cargo/config.toml)
+src-tauri/bindings

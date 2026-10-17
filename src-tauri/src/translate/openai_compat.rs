@@ -345,7 +345,6 @@ impl TranslateProvider for OpenAICompatProvider {
             source_lang: from.to_string(),
             target_lang: to.to_string(),
             provider: "openai".into(),
-            alternatives: vec![],
         })
     }
 }

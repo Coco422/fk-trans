@@ -100,7 +100,6 @@ impl TranslateProvider for CustomHttpProvider {
             source_lang: from.to_string(),
             target_lang: to.to_string(),
             provider: "custom_http".into(),
-            alternatives: vec![],
         })
     }
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use std::sync::mpsc::Sender;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -7,8 +8,9 @@ use std::sync::{
 
 pub type SharedMouseTriggerState = Arc<Mutex<MouseTriggerState>>;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub enum MouseTriggerStatus {
     Starting,
     PermissionMissing,
@@ -20,8 +22,9 @@ pub enum MouseTriggerStatus {
     Stopped,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub enum TriggerSource {
     MouseMiddle,
     MouseSelection,
@@ -29,19 +32,30 @@ pub enum TriggerSource {
     Test,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Timestamps are milliseconds since the epoch. They cross IPC as plain JSON
+/// numbers (`#[ts(type = "number")]`) rather than ts-rs's default `bigint`, which
+/// the frontend would never see and could not compare against.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct MouseTriggerState {
     pub status: MouseTriggerStatus,
     pub accessibility_trusted: bool,
+    #[ts(type = "number")]
     pub trigger_button: i64,
     pub selection_trigger_enabled: bool,
+    #[ts(type = "number | null")]
     pub last_button: Option<i64>,
+    #[ts(type = "number | null")]
     pub last_event_at: Option<i64>,
+    #[ts(type = "number | null")]
     pub last_trigger_at: Option<i64>,
+    #[ts(type = "number | null")]
     pub last_pipeline_at: Option<i64>,
     pub last_pipeline_source: Option<TriggerSource>,
     pub last_pipeline_result: Option<String>,
     pub last_error: Option<String>,
+    #[ts(type = "number | null")]
     pub test_active_until: Option<i64>,
 }
 

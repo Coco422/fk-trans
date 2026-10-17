@@ -117,7 +117,6 @@ impl TranslateProvider for ClaudeProvider {
             source_lang: from.to_string(),
             target_lang: to.to_string(),
             provider: "claude".into(),
-            alternatives: vec![],
         })
     }
 }

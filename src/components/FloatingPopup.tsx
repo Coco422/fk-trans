@@ -1,9 +1,13 @@
 import { createSignal, onMount, onCleanup, Show, For } from "solid-js";
 import { listen } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { TranslationPayload } from "../types/translation";
+import {
+  aiAction,
+  writeClipboard,
+  type TranslationReadyPayload,
+} from "../api/commands";
 
+/** Extra things the user can ask for about the selected text. */
 const ACTIONS = [
   { id: "explain", label: "Explain" },
   { id: "summary", label: "Summary" },
@@ -11,8 +15,10 @@ const ACTIONS = [
   { id: "dict", label: "Dict" },
 ] as const;
 
+const AUTO_HIDE_MS = 30_000;
+
 export default function FloatingPopup() {
-  const [data, setData] = createSignal<TranslationPayload | null>(null);
+  const [data, setData] = createSignal<TranslationReadyPayload | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
   const [extraResult, setExtraResult] = createSignal<string>("");
@@ -20,130 +26,176 @@ export default function FloatingPopup() {
   const [actionLoading, setActionLoading] = createSignal<string | null>(null);
 
   let hideTimeout: ReturnType<typeof setTimeout> | undefined;
+  let copiedTimeout: ReturnType<typeof setTimeout> | undefined;
 
-  function resetHideTimeout() {
-    if (hideTimeout) clearTimeout(hideTimeout);
-    hideTimeout = setTimeout(() => {
-      hidePopup();
-    }, 30_000);
+  function clearHideTimeout() {
+    if (hideTimeout) {
+      clearTimeout(hideTimeout);
+    }
+    hideTimeout = undefined;
   }
 
-  onMount(async () => {
+  /**
+   * Restart the idle timer. Called on every state change, not just on success:
+   * a slow or failed translation used to leave the original timer running, so
+   * the popup could hide while it was still loading.
+   */
+  function keepAlive() {
+    clearHideTimeout();
+    hideTimeout = setTimeout(hidePopup, AUTO_HIDE_MS);
+  }
+
+  function hidePopup() {
+    clearHideTimeout();
+    void getCurrentWindow()
+      .hide()
+      .catch((reason) => console.error("failed to hide popup", reason));
+  }
+
+  onMount(() => {
     const win = getCurrentWindow();
+    const unlisten: Array<() => void> = [];
 
-    const unlisten = await listen<TranslationPayload>(
-      "translation-ready",
-      (event) => {
-        setData(event.payload);
-        setExtraResult("");
-        setError(null);
-        setLoading(false);
-        resetHideTimeout();
-      }
-    );
+    void (async () => {
+      unlisten.push(
+        await listen<TranslationReadyPayload>("translation-ready", (event) => {
+          setData(event.payload);
+          setExtraResult("");
+          setError(null);
+          setLoading(false);
+          keepAlive();
+        })
+      );
 
-    const unlistenLoading = await listen("translation-started", () => {
-      setLoading(true);
-      setData(null);
-      setError(null);
-      setExtraResult("");
-    });
+      unlisten.push(
+        await listen("translation-started", () => {
+          setLoading(true);
+          setData(null);
+          setError(null);
+          setExtraResult("");
+          keepAlive();
+        })
+      );
 
-    const unlistenError = await listen<string>("translation-error", (event) => {
-      setError(event.payload);
-      setLoading(false);
-      setData(null);
-    });
+      unlisten.push(
+        await listen<string>("translation-error", (event) => {
+          setError(event.payload);
+          setLoading(false);
+          setData(null);
+          keepAlive();
+        })
+      );
 
-    const unlistenBlur = await win.onCloseRequested(() => {
-      // prevent close, just hide
-    });
+      // The window is hidden rather than closed, so a close request is refused.
+      unlisten.push(
+        await win.onCloseRequested((event) => {
+          event.preventDefault();
+          hidePopup();
+        })
+      );
+    })();
 
     document.addEventListener("keydown", handleKeydown);
 
     onCleanup(() => {
-      unlisten();
-      unlistenLoading();
-      unlistenError();
-      unlistenBlur();
+      for (const stop of unlisten) {
+        stop();
+      }
       document.removeEventListener("keydown", handleKeydown);
-      if (hideTimeout) clearTimeout(hideTimeout);
+      clearHideTimeout();
+      if (copiedTimeout) {
+        clearTimeout(copiedTimeout);
+      }
     });
   });
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === "Escape") {
+  function handleKeydown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
       hidePopup();
     }
   }
 
-  function hidePopup() {
-    if (hideTimeout) clearTimeout(hideTimeout);
-    getCurrentWindow().hide().catch((e) => setError(`Close failed: ${e}`));
-  }
-
-  function startDrag(e: MouseEvent) {
-    if (e.button !== 0) return;
-    getCurrentWindow().startDragging().catch(() => {});
+  function startDrag(event: MouseEvent) {
+    if (event.button !== 0) {
+      return;
+    }
+    void getCurrentWindow()
+      .startDragging()
+      .catch(() => {});
   }
 
   async function handleAction(action: string) {
     const payload = data();
-    if (!payload) return;
-    const sourceLang =
-      payload.result.sourceLang ?? payload.result.source_lang ?? "auto";
-    const targetLang =
-      payload.result.targetLang ?? payload.result.target_lang ?? "zh";
+    if (!payload) {
+      return;
+    }
 
     setActionLoading(action);
     setExtraResult("");
+    keepAlive();
     try {
-      const result = await invoke<string>("ai_action", {
+      const result = await aiAction({
         text: payload.original,
         action,
-        sourceLang,
-        targetLang,
+        sourceLang: payload.result.sourceLang,
+        targetLang: payload.result.targetLang,
       });
       setExtraResult(result);
-      resetHideTimeout();
-    } catch (e) {
-      setExtraResult(`Error: ${e}`);
+      keepAlive();
+    } catch (reason) {
+      setExtraResult(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setActionLoading(null);
     }
   }
 
   async function handleCopy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // fallback: invoke tauri clipboard
-      await invoke("plugin:clipboard-manager|write_text", { text });
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+    await writeClipboard(text).catch((reason) => {
+      console.error("failed to copy translation", reason);
+    });
+    setCopied(true);
+    if (copiedTimeout) {
+      clearTimeout(copiedTimeout);
     }
+    copiedTimeout = setTimeout(() => setCopied(false), 1500);
   }
+
+  const CloseButton = (props: { onMouseDown: (event: MouseEvent) => void }) => (
+    <button
+      class="w-6 h-6 grid place-items-center rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-gray-800 cursor-pointer"
+      aria-label="Close"
+      onMouseDown={props.onMouseDown}
+      onClick={hidePopup}
+    >
+      ×
+    </button>
+  );
 
   return (
     <div class="w-full h-full flex items-start justify-start p-3 m-0 overflow-hidden">
-      {/* Error state */}
       <Show when={error()}>
         <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-sm p-4 w-[376px] animate-fade-in">
-          <div class="flex items-center gap-2 text-red-500 mb-2 cursor-move select-none" onMouseDown={startDrag}>
-            <svg class="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          <div
+            class="flex items-center gap-2 text-red-500 mb-2 cursor-move select-none"
+            onMouseDown={startDrag}
+          >
+            <svg
+              class="w-4 h-4 shrink-0"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width={2}
+                d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+              />
             </svg>
             <span class="text-sm font-medium">Translation Error</span>
-            <button
-              class="ml-auto w-6 h-6 grid place-items-center rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-gray-800 cursor-pointer"
-              aria-label="Close"
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={hidePopup}
-            >
-              ×
-            </button>
+            <div class="ml-auto">
+              <CloseButton onMouseDown={(event) => event.stopPropagation()} />
+            </div>
           </div>
           <p class="text-xs text-gray-600 dark:text-gray-400">{error()}</p>
           <button
@@ -155,10 +207,12 @@ export default function FloatingPopup() {
         </div>
       </Show>
 
-      {/* Loading state */}
       <Show when={loading() && !data() && !error()}>
         <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-sm p-4 w-[376px] animate-fade-in">
-          <div class="flex items-center gap-3 mb-3 cursor-move select-none" onMouseDown={startDrag}>
+          <div
+            class="flex items-center gap-3 mb-3 cursor-move select-none"
+            onMouseDown={startDrag}
+          >
             <div class="relative w-5 h-5">
               <div class="absolute inset-0 rounded-full border-2 border-blue-200 dark:border-blue-800" />
               <div class="absolute inset-0 rounded-full border-2 border-transparent border-t-blue-500 animate-spin" />
@@ -166,16 +220,10 @@ export default function FloatingPopup() {
             <span class="text-sm font-medium text-gray-700 dark:text-gray-300">
               Translating...
             </span>
-            <button
-              class="ml-auto w-6 h-6 grid place-items-center rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-gray-800 cursor-pointer"
-              aria-label="Close"
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={hidePopup}
-            >
-              ×
-            </button>
+            <div class="ml-auto">
+              <CloseButton onMouseDown={(event) => event.stopPropagation()} />
+            </div>
           </div>
-          {/* Shimmer placeholder */}
           <div class="space-y-2">
             <div class="h-3 w-3/4 rounded bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 dark:from-gray-700 dark:via-gray-600 dark:to-gray-700 animate-pulse" />
             <div class="h-3 w-1/2 rounded bg-gradient-to-r from-gray-200 via-gray-100 to-gray-200 dark:from-gray-700 dark:via-gray-600 dark:to-gray-700 animate-pulse" />
@@ -183,52 +231,41 @@ export default function FloatingPopup() {
         </div>
       </Show>
 
-      {/* Translation result */}
       <Show when={data()}>
         {(payload) => (
           <div class="bg-white/95 dark:bg-gray-900/95 backdrop-blur-md rounded-xl shadow-sm p-4 w-[376px] animate-result-in">
-            {/* Language pair + provider */}
-            <div class="flex items-center justify-between mb-2 cursor-move select-none" onMouseDown={startDrag}>
+            <div
+              class="flex items-center justify-between mb-2 cursor-move select-none"
+              onMouseDown={startDrag}
+            >
               <div class="text-xs text-gray-500 dark:text-gray-400 font-mono">
-                {payload().result.sourceLang ?? payload().result.source_lang} →{" "}
-                {payload().result.targetLang ?? payload().result.target_lang}
+                {payload().result.sourceLang} → {payload().result.targetLang}
               </div>
               <div class="flex items-center gap-2">
                 <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-500">
                   {payload().result.provider}
                 </span>
-                {loading() && (
+                <Show when={loading()}>
                   <div class="w-3 h-3 border border-gray-300 border-t-blue-500 rounded-full animate-spin" />
-                )}
-                <button
-                  class="w-6 h-6 grid place-items-center rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 dark:hover:text-gray-200 dark:hover:bg-gray-800 cursor-pointer"
-                  aria-label="Close"
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={hidePopup}
-                >
-                  ×
-                </button>
+                </Show>
+                <CloseButton onMouseDown={(event) => event.stopPropagation()} />
               </div>
             </div>
 
-            {/* Original text */}
             <div class="popup-scroll text-sm text-gray-500 dark:text-gray-400 mb-3 pb-3 border-b border-gray-200 dark:border-gray-700 max-h-20 overflow-y-auto leading-relaxed">
               {payload().original}
             </div>
 
-            {/* Translation */}
             <div class="popup-scroll text-base text-gray-900 dark:text-white mb-2 whitespace-pre-wrap max-h-48 overflow-y-auto leading-relaxed">
               {payload().result.translated}
             </div>
 
-            {/* Extra result (explain/dict/summary) */}
             <Show when={extraResult()}>
               <div class="popup-scroll text-sm text-gray-600 dark:text-gray-300 mt-2 pt-2 border-t border-gray-200 dark:border-gray-700 whitespace-pre-wrap max-h-64 overflow-y-auto leading-relaxed">
                 {extraResult()}
               </div>
             </Show>
 
-            {/* Action buttons */}
             <div class="flex gap-1.5 mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
               <For each={ACTIONS}>
                 {(action) => (

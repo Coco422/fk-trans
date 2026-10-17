@@ -1,42 +1,23 @@
 import { createSignal, createResource, For, Show, onMount, onCleanup } from "solid-js";
-import { getVersion } from "@tauri-apps/api/app";
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
-import { buildUpdateProviderArgs } from "./tauriArgs";
+import * as api from "./api/commands";
+import type {
+  AppConfig,
+  ConfigPatch,
+  DiagnosticsSnapshot,
+  HistoryEntry,
+  MouseTriggerState,
+  ProviderConfig,
+  ProviderUpdate,
+} from "./api/types";
 
-interface ProviderConfig {
-  name: string;
-  base_url: string;
-  api_key: string;
-  model: string;
-  system_prompt: string;
-  user_prompt: string;
-  extra_params: Record<string, unknown>;
-}
-
-interface AppConfig {
-  enabled: boolean;
-  debug_logging: boolean;
-  selection_trigger_enabled: boolean;
-  source_lang: string;
-  target_lang: string;
-  active_provider: string;
-  mouse_trigger_button: number;
-  providers: ProviderConfig[];
-}
-
-interface HistoryEntry {
-  id: string;
-  timestamp: number;
-  original: string;
-  translated: string;
-  source_lang: string;
-  target_lang: string;
-  provider: string;
-}
-
+/**
+ * UI-only state. Everything that crosses the Rust boundary is imported from
+ * `./api/types`, which ts-rs generates from the Rust structs — the hand-written
+ * copies that used to live here had already drifted from the real payloads.
+ */
 interface UpdateStatus {
   status: "idle" | "checking" | "downloading" | "installed" | "none" | "error";
   message: string;
@@ -55,58 +36,6 @@ type ProviderStatus =
 interface ProviderUiStatus {
   status: ProviderStatus;
   message: string;
-}
-
-interface MouseTriggerState {
-  status: string;
-  accessibility_trusted: boolean;
-  trigger_button: number;
-  selection_trigger_enabled: boolean;
-  last_button?: number | null;
-  last_event_at?: number | null;
-  last_trigger_at?: number | null;
-  last_pipeline_at?: number | null;
-  last_pipeline_source?: string | null;
-  last_pipeline_result?: string | null;
-  last_error?: string | null;
-  test_active_until?: number | null;
-}
-
-interface DiagnosticsSnapshot {
-  app_version: string;
-  log_dir?: string | null;
-  debug_logging: boolean;
-  log_max_file_size_bytes: number;
-  log_rotation_keep_files: number;
-  accessibility_trusted: boolean;
-  mouse: MouseTriggerState;
-  active_provider_ready: boolean;
-  active_provider_reason?: string | null;
-  config_load_problem?: ConfigLoadProblem | null;
-  providers: Array<{
-    name: string;
-    active: boolean;
-    ready: boolean;
-    reason?: string | null;
-    base_url_configured: boolean;
-    api_key_configured: boolean;
-    model_configured: boolean;
-  }>;
-}
-
-/**
- * Set at startup when the config file could not be read. Without showing this the
- * app looks like it simply forgot the user's settings.
- */
-interface ConfigLoadProblem {
-  path: string;
-  kind: "unreadable" | "malformed";
-  detail: string;
-  backup_path?: string | null;
-}
-
-interface ExportedDiagnostics {
-  path: string;
 }
 
 const LANGUAGES = [
@@ -134,10 +63,32 @@ const PROVIDER_LABELS: Record<string, string> = {
 
 const LLM_PROVIDERS = new Set(["openai", "gemini", "claude", "ollama"]);
 
+/** Turn an unknown thrown value into something worth showing in the UI. */
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return typeof error === "string" ? error : JSON.stringify(error);
+}
+
+/**
+ * The draft is a full `ProviderConfig`; `ProviderUpdate` is the subset the
+ * command accepts. Both are generated, so this stays honest if either changes.
+ */
+function asProviderUpdate(name: string, draft: ProviderConfig): ProviderUpdate {
+  return {
+    name,
+    baseUrl: draft.baseUrl,
+    apiKey: draft.apiKey,
+    model: draft.model,
+    systemPrompt: draft.systemPrompt,
+    userPrompt: draft.userPrompt,
+    extraParams: draft.extraParams,
+  };
+}
+
 export default function App() {
-  const [config, { mutate }] = createResource<AppConfig>(() =>
-    invoke("get_config")
-  );
+  const [config, { mutate }] = createResource<AppConfig>(() => api.getConfig());
   const [history, setHistory] = createSignal<HistoryEntry[]>([]);
   const [providerStatus, setProviderStatus] = createSignal<
     Record<string, ProviderUiStatus>
@@ -156,7 +107,6 @@ export default function App() {
     status: "idle",
     message: "",
   });
-  const [appVersion, setAppVersion] = createSignal("");
   const [diagnostics, setDiagnostics] = createSignal<DiagnosticsSnapshot | null>(null);
   const [diagnosticsMessage, setDiagnosticsMessage] = createSignal("");
 
@@ -164,17 +114,14 @@ export default function App() {
     let unlistenConfig: (() => void) | undefined;
     let unlistenMouse: (() => void) | undefined;
 
-    getVersion()
-      .then(setAppVersion)
-      .catch(() => setAppVersion(""));
-
     refreshDiagnostics();
 
     listen("config-changed", async () => {
       try {
-        const updated = await invoke<AppConfig>("get_config");
-        mutate(updated);
-      } catch {}
+        mutate(await api.getConfig());
+      } catch (error) {
+        console.error("failed to reload config after external change", error);
+      }
     }).then((unlisten) => {
       unlistenConfig = unlisten;
     });
@@ -183,7 +130,7 @@ export default function App() {
         prev
           ? {
               ...prev,
-              accessibility_trusted: event.payload.accessibility_trusted,
+              accessibilityTrusted: event.payload.accessibilityTrusted,
               mouse: event.payload,
             }
           : prev
@@ -201,28 +148,33 @@ export default function App() {
 
   async function loadHistory() {
     try {
-      const entries = await invoke<HistoryEntry[]>("get_history");
-      setHistory(entries);
-    } catch {
+      setHistory(await api.getHistory());
+    } catch (error) {
+      console.error("failed to load history", error);
       setHistory([]);
     }
   }
 
   async function clearHistory() {
-    await invoke("clear_history");
+    await api.clearHistory();
     setHistory([]);
   }
 
-  async function saveConfig(updates: Partial<AppConfig>) {
-    const updated = await invoke<AppConfig>("update_config", { updates });
-    mutate(updated);
+  /**
+   * Apply a partial change. `ConfigPatch` is generated from Rust, so a key that
+   * is not a config field fails to compile here and is refused by Rust if it
+   * somehow gets through.
+   */
+  async function saveConfig(patch: ConfigPatch) {
+    mutate(await api.updateConfig(patch));
     await refreshDiagnostics();
   }
 
   async function refreshDiagnostics() {
     try {
-      setDiagnostics(await invoke<DiagnosticsSnapshot>("get_diagnostics_snapshot"));
-    } catch {
+      setDiagnostics(await api.getDiagnosticsSnapshot());
+    } catch (error) {
+      console.error("failed to read diagnostics", error);
       setDiagnostics(null);
     }
   }
@@ -230,7 +182,7 @@ export default function App() {
   async function startMiddleClickTest() {
     setDiagnosticsMessage("Press the mouse wheel within 10 seconds.");
     try {
-      const mouse = await invoke<MouseTriggerState>("start_middle_click_test");
+      const mouse = await api.startMiddleClickTest();
       setDiagnostics((prev) =>
         prev
           ? {
@@ -239,45 +191,45 @@ export default function App() {
             }
           : prev
       );
-    } catch (e) {
-      setDiagnosticsMessage(`Failed to start test: ${String(e)}`);
+    } catch (error) {
+      setDiagnosticsMessage(`Failed to start test: ${describeError(error)}`);
     }
   }
 
   async function saveLastMouseButton() {
-    const lastButton = diagnostics()?.mouse.last_button;
+    const lastButton = diagnostics()?.mouse.lastButton;
     if (lastButton === undefined || lastButton === null) return;
     try {
-      await saveConfig({ mouse_trigger_button: lastButton });
+      await saveConfig({ mouseTriggerButton: lastButton });
       setDiagnosticsMessage(`Saved button ${lastButton} as the trigger.`);
-    } catch (e) {
-      setDiagnosticsMessage(`Failed to save trigger button: ${String(e)}`);
+    } catch (error) {
+      setDiagnosticsMessage(`Failed to save trigger button: ${describeError(error)}`);
     }
   }
 
   async function openAccessibilitySettings() {
     try {
-      await invoke("open_accessibility_settings");
+      await api.openAccessibilitySettings();
       setDiagnosticsMessage("Opened macOS Accessibility settings.");
-    } catch (e) {
-      setDiagnosticsMessage(String(e));
+    } catch (error) {
+      setDiagnosticsMessage(describeError(error));
     }
   }
 
   async function exportDiagnostics() {
     try {
-      const result = await invoke<ExportedDiagnostics>("export_diagnostics_report");
+      const result = await api.exportDiagnosticsReport();
       setDiagnosticsMessage(`Diagnostics exported: ${result.path}`);
-    } catch (e) {
-      setDiagnosticsMessage(`Export failed: ${String(e)}`);
+    } catch (error) {
+      setDiagnosticsMessage(`Export failed: ${describeError(error)}`);
     }
   }
 
   async function revealDiagnosticsFolder() {
     try {
-      await invoke("reveal_diagnostics_folder");
-    } catch (e) {
-      setDiagnosticsMessage(`Reveal failed: ${String(e)}`);
+      await api.revealDiagnosticsFolder();
+    } catch (error) {
+      setDiagnosticsMessage(`Reveal failed: ${describeError(error)}`);
     }
   }
 
@@ -316,12 +268,12 @@ export default function App() {
 
   function providerChanged(a: ProviderConfig, b: ProviderConfig) {
     return (
-      a.base_url !== b.base_url ||
-      a.api_key !== b.api_key ||
+      a.baseUrl !== b.baseUrl ||
+      a.apiKey !== b.apiKey ||
       a.model !== b.model ||
-      a.system_prompt !== b.system_prompt ||
-      a.user_prompt !== b.user_prompt ||
-      JSON.stringify(a.extra_params ?? {}) !== JSON.stringify(b.extra_params ?? {})
+      a.systemPrompt !== b.systemPrompt ||
+      a.userPrompt !== b.userPrompt ||
+      JSON.stringify(a.extraParams ?? {}) !== JSON.stringify(b.extraParams ?? {})
     );
   }
 
@@ -347,9 +299,8 @@ export default function App() {
     }));
 
     try {
-      await invoke("update_provider", buildUpdateProviderArgs(name, draft));
-      const updated = await invoke<AppConfig>("get_config");
-      mutate(updated);
+      await api.updateProvider(asProviderUpdate(name, draft));
+      mutate(await api.getConfig());
       clearProviderDraft(name);
       setProviderStatus((prev) => ({
         ...prev,
@@ -357,10 +308,10 @@ export default function App() {
       }));
       await refreshDiagnostics();
       return true;
-    } catch (e) {
+    } catch (error) {
       setProviderStatus((prev) => ({
         ...prev,
-        [name]: { status: "save_error", message: String(e) },
+        [name]: { status: "save_error", message: describeError(error) },
       }));
       return false;
     }
@@ -369,7 +320,7 @@ export default function App() {
   function extraParamsValue(provider: ProviderConfig) {
     return (
       extraParamDrafts()[provider.name] ??
-      JSON.stringify(providerDraft(provider).extra_params || {}, null, 2)
+      JSON.stringify(providerDraft(provider).extraParams || {}, null, 2)
     );
   }
 
@@ -380,7 +331,7 @@ export default function App() {
       [provider.name]: { status: "dirty", message: "Unsaved changes" },
     }));
     try {
-      updateProviderDraft(provider, "extra_params", JSON.parse(raw));
+      updateProviderDraft(provider, "extraParams", JSON.parse(raw));
     } catch {
       // Keep the raw draft so typing invalid intermediate JSON does not get clobbered.
     }
@@ -391,7 +342,7 @@ export default function App() {
     if (raw === undefined) return commitProvider(provider.name);
 
     try {
-      updateProviderDraft(provider, "extra_params", JSON.parse(raw));
+      updateProviderDraft(provider, "extraParams", JSON.parse(raw));
       setExtraParamDrafts((prev) => {
         const next = { ...prev };
         delete next[provider.name];
@@ -422,17 +373,15 @@ export default function App() {
       [name]: { status: "testing", message: "Testing..." },
     }));
     try {
-      const result = await invoke<string>("test_provider", {
-        providerName: name,
-      });
+      const result = await api.testProvider(name);
       setProviderStatus((prev) => ({
         ...prev,
         [name]: { status: "test_success", message: result },
       }));
-    } catch (e) {
+    } catch (error) {
       setProviderStatus((prev) => ({
         ...prev,
-        [name]: { status: "test_error", message: String(e) },
+        [name]: { status: "test_error", message: describeError(error) },
       }));
     }
   }
@@ -496,7 +445,9 @@ export default function App() {
       const update = await check();
 
       if (!update) {
-        const version = appVersion();
+        // Single source of truth: the snapshot already carries the version, so
+        // there is no second reading that could disagree with what is displayed.
+        const version = diagnostics()?.appVersion ?? "";
         setUpdateStatus({
           status: "none",
           message: version
@@ -534,10 +485,10 @@ export default function App() {
       });
 
       await relaunch();
-    } catch (e) {
+    } catch (error) {
       setUpdateStatus({
         status: "error",
-        message: `Update failed: ${String(e)}`,
+        message: `Update failed: ${describeError(error)}`,
       });
     }
   }
@@ -549,7 +500,7 @@ export default function App() {
         <div class="flex items-center justify-between mb-4">
           <h1 class="text-xl font-semibold">fk-trans</h1>
           <span class="text-xs text-gray-400">
-            {appVersion() ? `v${appVersion()}` : ""}
+            {diagnostics()?.appVersion ? `v${diagnostics()?.appVersion}` : ""}
           </span>
         </div>
 
@@ -626,19 +577,19 @@ export default function App() {
                       </div>
                       <button
                         class={`w-11 h-6 rounded-full transition-colors cursor-pointer ${
-                          cfg().selection_trigger_enabled
+                          cfg().selectionTriggerEnabled
                             ? "bg-blue-500"
                             : "bg-gray-300 dark:bg-gray-700"
                         }`}
                         onClick={() =>
                           saveConfig({
-                            selection_trigger_enabled: !cfg().selection_trigger_enabled,
+                            selectionTriggerEnabled: !cfg().selectionTriggerEnabled,
                           })
                         }
                       >
                         <div
                           class={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
-                            cfg().selection_trigger_enabled
+                            cfg().selectionTriggerEnabled
                               ? "translate-x-[22px]"
                               : "translate-x-[2px]"
                           }`}
@@ -652,9 +603,9 @@ export default function App() {
                       <div class="flex items-center gap-3">
                         <select
                           class="flex-1 px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg"
-                          value={cfg().source_lang}
+                          value={cfg().sourceLang}
                           onChange={(e) =>
-                            saveConfig({ source_lang: e.currentTarget.value })
+                            saveConfig({ sourceLang: e.currentTarget.value })
                           }
                         >
                           <For each={LANGUAGES}>
@@ -666,9 +617,9 @@ export default function App() {
                         <span class="text-gray-400 text-lg">&rarr;</span>
                         <select
                           class="flex-1 px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg"
-                          value={cfg().target_lang}
+                          value={cfg().targetLang}
                           onChange={(e) =>
-                            saveConfig({ target_lang: e.currentTarget.value })
+                            saveConfig({ targetLang: e.currentTarget.value })
                           }
                         >
                           <For each={LANGUAGES.filter((l) => l.code !== "auto")}>
@@ -687,10 +638,10 @@ export default function App() {
                       </div>
                       <select
                         class="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg"
-                        value={cfg().active_provider}
+                        value={cfg().activeProvider}
                         onChange={(e) =>
                           saveConfig({
-                            active_provider: e.currentTarget.value,
+                            activeProvider: e.currentTarget.value,
                           })
                         }
                       >
@@ -712,13 +663,13 @@ export default function App() {
                           <kbd class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[11px] font-mono">
                             Select Text
                           </kbd>{" "}
-                          {cfg().selection_trigger_enabled ? "auto-translates after drag selection" : "disabled"}
+                          {cfg().selectionTriggerEnabled ? "auto-translates after drag selection" : "disabled"}
                         </div>
                         <div>
                           <kbd class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[11px] font-mono">
                             Middle Click
                           </kbd>{" "}
-                          on selected text to translate (button {cfg().mouse_trigger_button})
+                          on selected text to translate (button {cfg().mouseTriggerButton})
                         </div>
                         <div>
                           <kbd class="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-[11px] font-mono">
@@ -816,11 +767,11 @@ export default function App() {
                                 type="password"
                                 class="w-full px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400"
                                 placeholder="API Key"
-                                value={providerDraft(provider).api_key}
+                                value={providerDraft(provider).apiKey}
                                 onInput={(e) =>
                                   updateProviderDraft(
                                     provider,
-                                    "api_key",
+                                    "apiKey",
                                     e.currentTarget.value
                                   )
                                 }
@@ -830,11 +781,11 @@ export default function App() {
                               <input
                                 class="flex-1 px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400"
                                 placeholder="Base URL"
-                                value={providerDraft(provider).base_url}
+                                value={providerDraft(provider).baseUrl}
                                 onInput={(e) =>
                                   updateProviderDraft(
                                     provider,
-                                    "base_url",
+                                    "baseUrl",
                                     e.currentTarget.value
                                   )
                                 }
@@ -894,11 +845,11 @@ export default function App() {
                                     class="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400 resize-y min-h-[60px] font-mono"
                                     rows={3}
                                     placeholder="You are a translator..."
-                                    value={providerDraft(provider).system_prompt}
+                                    value={providerDraft(provider).systemPrompt}
                                     onInput={(e) =>
                                       updateProviderDraft(
                                         provider,
-                                        "system_prompt",
+                                        "systemPrompt",
                                         e.currentTarget.value
                                       )
                                     }
@@ -917,11 +868,11 @@ export default function App() {
                                     class="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg placeholder-gray-400 resize-y min-h-[40px] font-mono"
                                     rows={2}
                                     placeholder="{text}"
-                                    value={providerDraft(provider).user_prompt}
+                                    value={providerDraft(provider).userPrompt}
                                     onInput={(e) =>
                                       updateProviderDraft(
                                         provider,
-                                        "user_prompt",
+                                        "userPrompt",
                                         e.currentTarget.value
                                       )
                                     }
@@ -989,7 +940,7 @@ export default function App() {
                     >
                       {(diag) => (
                         <>
-                          <Show when={diag().config_load_problem}>
+                          <Show when={diag().configLoadProblem}>
                             {(problem) => (
                               <div class="p-4 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/30">
                                 <div class="text-sm font-medium text-amber-800 dark:text-amber-200">
@@ -1003,11 +954,11 @@ export default function App() {
                                 <div class="mt-1 text-xs text-amber-700 dark:text-amber-300">
                                   {problem().detail}
                                 </div>
-                                <Show when={problem().backup_path}>
+                                <Show when={problem().backupPath}>
                                   <div class="mt-2 text-xs text-amber-800 dark:text-amber-200">
                                     The original was kept at{" "}
                                     <span class="font-mono break-all">
-                                      {problem().backup_path}
+                                      {problem().backupPath}
                                     </span>
                                     . Everything below is showing defaults.
                                   </div>
@@ -1022,13 +973,13 @@ export default function App() {
                                 <div class="text-sm font-medium">Middle Click Test</div>
                                 <div
                                   class={`mt-1 text-xs ${
-                                    diag().mouse.accessibility_trusted
+                                    diag().mouse.accessibilityTrusted
                                       ? "text-green-500"
                                       : "text-red-500"
                                   }`}
                                 >
                                   Accessibility{" "}
-                                  {diag().mouse.accessibility_trusted
+                                  {diag().mouse.accessibilityTrusted
                                     ? "Granted"
                                     : "Missing"}
                                 </div>
@@ -1056,50 +1007,50 @@ export default function App() {
                               </div>
                               <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
                                 <div class="text-gray-400 mb-1">Trigger Button</div>
-                                <div class="font-mono">{cfg().mouse_trigger_button}</div>
+                                <div class="font-mono">{cfg().mouseTriggerButton}</div>
                               </div>
                               <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
                                 <div class="text-gray-400 mb-1">Selection Trigger</div>
                                 <div class="font-mono">
-                                  {diag().mouse.selection_trigger_enabled ? "enabled" : "disabled"}
+                                  {diag().mouse.selectionTriggerEnabled ? "enabled" : "disabled"}
                                 </div>
                               </div>
                               <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
                                 <div class="text-gray-400 mb-1">Last Button</div>
                                 <div class="font-mono">
-                                  {diag().mouse.last_button ?? "None"}
+                                  {diag().mouse.lastButton ?? "None"}
                                 </div>
                               </div>
                               <div class="p-3 rounded bg-gray-50 dark:bg-gray-800">
                                 <div class="text-gray-400 mb-1">Last Trigger</div>
                                 <div class="font-mono">
-                                  {formatMillis(diag().mouse.last_trigger_at)}
+                                  {formatMillis(diag().mouse.lastTriggerAt)}
                                 </div>
                               </div>
                             </div>
 
-                            <Show when={diag().mouse.last_pipeline_result}>
+                            <Show when={diag().mouse.lastPipelineResult}>
                               <div class="mt-3 text-xs p-3 rounded bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-300">
-                                {diag().mouse.last_pipeline_result}
+                                {diag().mouse.lastPipelineResult}
                               </div>
                             </Show>
-                            <Show when={diag().mouse.last_error}>
+                            <Show when={diag().mouse.lastError}>
                               <div class="mt-3 text-xs p-3 rounded bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300">
-                                {diag().mouse.last_error}
+                                {diag().mouse.lastError}
                               </div>
                             </Show>
                             <Show
                               when={
-                                diag().mouse.last_button !== undefined &&
-                                diag().mouse.last_button !== null &&
-                                diag().mouse.last_button !== cfg().mouse_trigger_button
+                                diag().mouse.lastButton !== undefined &&
+                                diag().mouse.lastButton !== null &&
+                                diag().mouse.lastButton !== cfg().mouseTriggerButton
                               }
                             >
                               <button
                                 class="mt-3 text-xs px-3 py-2 bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 rounded hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors cursor-pointer"
                                 onClick={saveLastMouseButton}
                               >
-                                Use button {diag().mouse.last_button} as trigger
+                                Use button {diag().mouse.lastButton} as trigger
                               </button>
                             </Show>
                           </div>
@@ -1108,14 +1059,14 @@ export default function App() {
                             <div class="text-sm font-medium mb-3">Provider Readiness</div>
                             <div
                               class={`text-xs p-3 rounded mb-3 ${
-                                diag().active_provider_ready
+                                diag().activeProviderReady
                                   ? "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300"
                                   : "bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300"
                               }`}
                             >
-                              {diag().active_provider_ready
+                              {diag().activeProviderReady
                                 ? "Active provider is ready"
-                                : diag().active_provider_reason ||
+                                : diag().activeProviderReason ||
                                   "Active provider is not ready"}
                             </div>
                             <div class="space-y-2">
@@ -1154,19 +1105,19 @@ export default function App() {
                               </div>
                               <button
                                 class={`w-11 h-6 rounded-full transition-colors cursor-pointer ${
-                                  cfg().debug_logging
+                                  cfg().debugLogging
                                     ? "bg-blue-500"
                                     : "bg-gray-300 dark:bg-gray-700"
                                 }`}
                                 onClick={() =>
                                   saveConfig({
-                                    debug_logging: !cfg().debug_logging,
+                                    debugLogging: !cfg().debugLogging,
                                   })
                                 }
                               >
                                 <div
                                   class={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
-                                    cfg().debug_logging
+                                    cfg().debugLogging
                                       ? "translate-x-[22px]"
                                       : "translate-x-[2px]"
                                   }`}
@@ -1177,9 +1128,9 @@ export default function App() {
                               <div>
                                 <div class="text-sm font-medium">Diagnostics Report</div>
                                 <div class="text-xs text-gray-500 mt-1 truncate max-w-[360px]">
-                                  {diag().log_dir || "Log directory unavailable"} ·{" "}
-                                  {Math.round(diag().log_max_file_size_bytes / 1024)}KB ×{" "}
-                                  {diag().log_rotation_keep_files + 1}
+                                  {diag().logDir || "Log directory unavailable"} ·{" "}
+                                  {Math.round(diag().logMaxFileSizeBytes / 1024)}KB ×{" "}
+                                  {diag().logRotationKeepFiles + 1}
                                 </div>
                               </div>
                               <div class="flex gap-2">
@@ -1235,7 +1186,7 @@ export default function App() {
                         <div class="p-3 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
                           <div class="flex items-center justify-between mb-1">
                             <div class="text-[10px] text-gray-400 font-mono">
-                              {entry.source_lang} → {entry.target_lang}
+                              {entry.sourceLang} → {entry.targetLang}
                               <span class="ml-1">[{entry.provider}]</span>
                             </div>
                             <div class="text-[10px] text-gray-400">

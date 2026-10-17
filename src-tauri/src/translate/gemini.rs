@@ -121,7 +121,6 @@ impl TranslateProvider for GeminiProvider {
             source_lang: from.to_string(),
             target_lang: to.to_string(),
             provider: "gemini".into(),
-            alternatives: vec![],
         })
     }
 }

@@ -2,13 +2,16 @@ use crate::config::{self, AppConfig, ConfigLoadProblem};
 use crate::mouse::listener::{self, MouseTriggerState};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const MAX_LOG_LINES: usize = 240;
 const MAX_FRONTEND_LOG_CHARS: usize = 2000;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct ProviderDiagnostic {
     pub name: String,
     pub active: bool,
@@ -19,11 +22,15 @@ pub struct ProviderDiagnostic {
     pub model_configured: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct DiagnosticsSnapshot {
     pub app_version: String,
     pub log_dir: Option<String>,
     pub debug_logging: bool,
+    /// A file size, so well within the range a JSON number represents exactly.
+    #[ts(type = "number")]
     pub log_max_file_size_bytes: u64,
     pub log_rotation_keep_files: usize,
     pub accessibility_trusted: bool,
@@ -36,7 +43,9 @@ pub struct DiagnosticsSnapshot {
     pub config_load_problem: Option<ConfigLoadProblem>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct ExportedDiagnostics {
     pub path: String,
 }

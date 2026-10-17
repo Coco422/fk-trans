@@ -1,15 +1,16 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct TranslateResult {
     pub original: String,
     pub translated: String,
     pub source_lang: String,
     pub target_lang: String,
     pub provider: String,
-    pub alternatives: Vec<String>,
 }
 
 #[derive(Debug, Error)]

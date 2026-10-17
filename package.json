@@ -8,13 +8,14 @@
     "dev": "vite",
     "build": "vite build",
     "serve": "vite preview",
-    "test:tauri-args": "node scripts/check-tauri-command-args.mjs",
+    "gen:types": "cargo test --offline --manifest-path src-tauri/Cargo.toml --lib -- export_bindings",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run build -- --mode development",
     "tauri": "tauri",
     "release:mac": "scripts/release-mac.sh"
   },
   "license": "MIT",
   "dependencies": {
-    "@solidjs/router": "^0.16.1",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "@tauri-apps/plugin-process": "^2.3.1",
@@ -22,8 +23,6 @@
     "solid-js": "^1.9.3"
   },
   "devDependencies": {
-    "@emnapi/core": "^1.10.0",
-    "@emnapi/runtime": "^1.10.0",
     "@tailwindcss/vite": "^4.3.0",
     "@tauri-apps/cli": "^2",
     "tailwindcss": "^4.3.0",

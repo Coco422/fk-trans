@@ -99,7 +99,6 @@ impl TranslateProvider for OllamaProvider {
             source_lang: from.to_string(),
             target_lang: to.to_string(),
             provider: "ollama".into(),
-            alternatives: vec![],
         })
     }
 }
