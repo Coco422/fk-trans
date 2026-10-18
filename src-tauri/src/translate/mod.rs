@@ -157,6 +157,30 @@ impl TranslationEngine {
         Ok(())
     }
 
+    /// Ask a model something that is not a translation.
+    ///
+    /// `provider` names the entry to use; `None` means the active one. A name
+    /// that does not exist is an error rather than a quiet fall back to the
+    /// active provider — answering from a service the user did not pick is how a
+    /// carefully configured key ends up unused without anyone noticing.
+    ///
+    /// No system prompt is sent. A provider's own is a *translation*
+    /// instruction, and prefixing one to "explain this text" asks the model to
+    /// translate the explanation request.
+    pub async fn complete(
+        &self,
+        provider: Option<&str>,
+        prompt: &str,
+    ) -> Result<String, TranslateError> {
+        let name = provider.unwrap_or(&self.active_provider);
+        let entry = self
+            .providers
+            .get(name)
+            .ok_or_else(|| TranslateError::Config(format!("Provider '{name}' not found")))?;
+
+        entry.provider.complete("", prompt).await
+    }
+
     pub async fn translate(
         &self,
         text: &str,

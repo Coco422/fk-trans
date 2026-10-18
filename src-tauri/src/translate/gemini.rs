@@ -87,33 +87,33 @@ impl GeminiProvider {
     }
 }
 
-#[async_trait::async_trait]
-impl TranslateProvider for GeminiProvider {
-    async fn translate(
-        &self,
-        text: &str,
-        from: &str,
-        to: &str,
-    ) -> Result<TranslateResult, TranslateError> {
+impl GeminiProvider {
+    /// One round trip to `generateContent`, with the prompts already written.
+    ///
+    /// Both entry points below come through here, so a change to the request or
+    /// to the way the answer is read cannot apply to one and not the other.
+    async fn chat(&self, system: &str, user: &str) -> Result<String, TranslateError> {
         if self.api_key.trim().is_empty() {
             return Err(TranslateError::Config(
                 "Gemini API key not configured".into(),
             ));
         }
 
-        let vars = PromptVars { from, to, text };
-        let body = serde_json::json!({
-            "systemInstruction": {
-                "parts": [{ "text": format_prompt(&self.system_prompt, &vars) }]
-            },
+        let mut body = serde_json::json!({
             "contents": [{
-                "parts": [{ "text": format_prompt(&self.user_prompt, &vars) }]
+                "parts": [{ "text": user }]
             }],
             "generationConfig": {
                 "temperature": 0.3,
                 "maxOutputTokens": 2048
             }
         });
+
+        if !system.trim().is_empty() {
+            body["systemInstruction"] = serde_json::json!({
+                "parts": [{ "text": system }]
+            });
+        }
 
         // The key goes in a header, not `?key=`: as a query parameter it ends up
         // in every proxy log and access log between here and Google.
@@ -129,11 +129,28 @@ impl TranslateProvider for GeminiProvider {
         .await?;
 
         let json = response.json()?;
-        let translated = require_translation(
-            Self::extract_translation(&json),
-            "Gemini",
-            || Self::response_shape_summary(&json),
-        )?;
+        require_translation(Self::extract_translation(&json), "Gemini", || {
+            Self::response_shape_summary(&json)
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl TranslateProvider for GeminiProvider {
+    async fn translate(
+        &self,
+        text: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<TranslateResult, TranslateError> {
+        let vars = PromptVars { from, to, text };
+
+        let translated = self
+            .chat(
+                &format_prompt(&self.system_prompt, &vars),
+                &format_prompt(&self.user_prompt, &vars),
+            )
+            .await?;
 
         Ok(TranslateResult {
             original: text.to_string(),
@@ -142,6 +159,10 @@ impl TranslateProvider for GeminiProvider {
             target_lang: to.to_string(),
             provider: "gemini".into(),
         })
+    }
+
+    async fn complete(&self, system: &str, user: &str) -> Result<String, TranslateError> {
+        self.chat(system, user).await
     }
 }
 

@@ -89,29 +89,31 @@ impl ClaudeProvider {
     }
 }
 
-#[async_trait::async_trait]
-impl TranslateProvider for ClaudeProvider {
-    async fn translate(
-        &self,
-        text: &str,
-        from: &str,
-        to: &str,
-    ) -> Result<TranslateResult, TranslateError> {
+impl ClaudeProvider {
+    /// One round trip to `/v1/messages`, with the messages already written.
+    ///
+    /// Both entry points below come through here, so a change to the request or
+    /// to the way the answer is read cannot apply to one and not the other.
+    async fn chat(&self, system: &str, user: &str) -> Result<String, TranslateError> {
         if self.api_key.trim().is_empty() {
             return Err(TranslateError::Config(
                 "Claude API key not configured".into(),
             ));
         }
 
-        let vars = PromptVars { from, to, text };
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": 2048,
-            "system": format_prompt(&self.system_prompt, &vars),
             "messages": [
-                { "role": "user", "content": format_prompt(&self.user_prompt, &vars) }
+                { "role": "user", "content": user }
             ]
         });
+
+        // Claude takes the system prompt as its own field, and rejects an empty
+        // string, so it is only set when there is one.
+        if !system.trim().is_empty() {
+            body["system"] = serde_json::json!(system);
+        }
 
         let response = send(
             self.client
@@ -123,11 +125,28 @@ impl TranslateProvider for ClaudeProvider {
         .await?;
 
         let json = response.json()?;
-        let translated = require_translation(
-            Self::extract_translation(&json),
-            "Claude",
-            || Self::response_shape_summary(&json),
-        )?;
+        require_translation(Self::extract_translation(&json), "Claude", || {
+            Self::response_shape_summary(&json)
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl TranslateProvider for ClaudeProvider {
+    async fn translate(
+        &self,
+        text: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<TranslateResult, TranslateError> {
+        let vars = PromptVars { from, to, text };
+
+        let translated = self
+            .chat(
+                &format_prompt(&self.system_prompt, &vars),
+                &format_prompt(&self.user_prompt, &vars),
+            )
+            .await?;
 
         Ok(TranslateResult {
             original: text.to_string(),
@@ -136,6 +155,10 @@ impl TranslateProvider for ClaudeProvider {
             target_lang: to.to_string(),
             provider: "claude".into(),
         })
+    }
+
+    async fn complete(&self, system: &str, user: &str) -> Result<String, TranslateError> {
+        self.chat(system, user).await
     }
 }
 

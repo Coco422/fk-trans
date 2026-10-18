@@ -2,7 +2,7 @@ import { For, onMount, Show } from "solid-js";
 import { store } from "../store";
 import Button from "../ui/Button";
 import Card from "../ui/Card";
-import { languageLabel } from "./languages";
+import { languageLabel } from "./labels";
 
 function formatSeconds(value: number): string {
   return new Date(value * 1000).toLocaleString();

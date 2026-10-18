@@ -6,7 +6,8 @@ import Badge, { type Tone } from "../ui/Badge";
 import Button from "../ui/Button";
 import Card from "../ui/Card";
 import Field, { TextArea, TextInput } from "../ui/Field";
-import { providerLabel } from "./languages";
+import ActionsCard from "./ActionsCard";
+import { providerLabel } from "./labels";
 
 /**
  * Providers with prompts and an OpenAI-shaped request body. DeepLX takes a bare
@@ -326,6 +327,8 @@ export default function ProvidersTab() {
               );
             }}
           </For>
+
+          <ActionsCard />
         </div>
       )}
     </Show>

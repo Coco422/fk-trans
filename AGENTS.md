@@ -82,6 +82,17 @@ in sync, so prefer AppKit-native behaviour over portable-looking indirection.
   shown too, because a migration the user cannot see is indistinguishable from
   the app editing their settings.
 
+- The popup's extra actions (explain / summary / polish / dict) are
+  *instructions to a model*, not translations, and go through
+  `TranslateProvider::complete`. Sending one through `translate` wrapped it in
+  the translation template, so the model was asked to translate its own
+  instruction. `complete` sends no system prompt for the same reason: a
+  provider's own is a translation instruction.
+- Each action has its own prompt and an optional provider override, in
+  `AppConfig::actions`. `validate_actions` refuses a list that would leave the
+  popup with a button it cannot honour — a prompt without `{text}` never sees the
+  selection, and a missing action takes a button away silently.
+
 ## Changing a Provider
 
 Anything request-shaped a preset needs goes in that entry's `extra_params` — it

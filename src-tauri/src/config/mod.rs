@@ -64,6 +64,9 @@ pub struct AppConfig {
     pub source_lang: String,
     pub target_lang: String,
     pub active_provider: String,
+    /// The popup's extra actions, in the order they are offered.
+    #[serde(default = "default_actions")]
+    pub actions: Vec<ActionConfig>,
     #[serde(default = "default_mouse_trigger_button")]
     #[ts(type = "number")]
     pub mouse_trigger_button: i64,
@@ -97,6 +100,10 @@ pub struct ConfigPatch {
     pub target_lang: Option<String>,
     #[ts(optional)]
     pub active_provider: Option<String>,
+    /// The whole list at once: it is small, and a partial patch of a list has no
+    /// meaning worth inventing.
+    #[ts(optional)]
+    pub actions: Option<Vec<ActionConfig>>,
     #[ts(optional)]
     #[ts(type = "number")]
     pub mouse_trigger_button: Option<i64>,
@@ -140,6 +147,10 @@ impl ConfigPatch {
             }
             config.active_provider = provider.clone();
         }
+        if let Some(actions) = &self.actions {
+            validate_actions(actions)?;
+            config.actions = actions.clone();
+        }
         if let Some(button) = self.mouse_trigger_button {
             if !(MIN_TRIGGER_BUTTON..=MAX_TRIGGER_BUTTON).contains(&button) {
                 return Err(format!(
@@ -151,6 +162,101 @@ impl ConfigPatch {
         }
         Ok(())
     }
+}
+
+/// The ids of the popup's extra actions.
+///
+/// Fixed, because they are what the frontend sends, what a config written by an
+/// older build already contains, and what the prompt for each is looked up by.
+pub const ACTION_IDS: [&str; 4] = ["explain", "summary", "polish", "dict"];
+
+/// One of the popup's extra actions.
+///
+/// These are instructions to a model, not translations, so they are rendered
+/// with the same placeholders a provider's own prompts use — and sent through
+/// `complete` rather than `translate`. Sending one through the translation
+/// template, which is what used to happen, asked the model to translate its own
+/// instruction.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export, export_to = "types.ts")]
+pub struct ActionConfig {
+    /// One of [`ACTION_IDS`].
+    pub id: String,
+    /// Which provider to ask. `None` means the active one, which is what most
+    /// people want and what the app did before this was configurable.
+    ///
+    /// Always written, as `null` when unset: a field that disappears from the
+    /// JSON makes the generated TypeScript a lie about what is on the wire.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Rendered with `{text}`, `{from}`, `{to}`, `{from_name}` and friends.
+    pub prompt: String,
+}
+
+/// The prompts the actions ship with.
+///
+/// Written in English because models follow an English instruction more
+/// reliably; the language of the *answer* is `{to}`, which is what the user
+/// actually controls.
+pub fn default_actions() -> Vec<ActionConfig> {
+    let prompt = |id: &str, text: &str| ActionConfig {
+        id: id.to_string(),
+        provider: None,
+        prompt: text.to_string(),
+    };
+
+    vec![
+        prompt(
+            "explain",
+            "Explain what the following text means and how it is used, in {to}. \
+             Be specific about anything idiomatic or ambiguous.\n\n{text}",
+        ),
+        prompt(
+            "summary",
+            "Summarize the following text concisely in {to}. Keep the points that \
+             matter and drop the rest.\n\n{text}",
+        ),
+        prompt(
+            "polish",
+            "Rewrite the following text so it reads more naturally, keeping its \
+             meaning exactly. Answer in {to}, and keep the rewritten text itself in \
+             {from}.\n\n{text}",
+        ),
+        prompt(
+            "dict",
+            "Give dictionary-style information for the following word or phrase in \
+             {to}: its part of speech, its meaning here, and one example sentence. \
+             Text:\n\n{text}",
+        ),
+    ]
+}
+
+/// Reject an action list that would leave the popup with something it cannot do.
+///
+/// A prompt without `{text}` never sees the selection, which looks like the
+/// action returning a generic answer about nothing, so it is refused here rather
+/// than discovered later.
+pub fn validate_actions(actions: &[ActionConfig]) -> Result<(), String> {
+    for action in actions {
+        if !ACTION_IDS.contains(&action.id.as_str()) {
+            return Err(format!("未知的动作：{}", action.id));
+        }
+        if !action.prompt.contains("{text}") {
+            return Err(format!("动作「{}」的提示词里没有 {{text}}", action.id));
+        }
+    }
+
+    let missing: Vec<&str> = ACTION_IDS
+        .iter()
+        .filter(|id| !actions.iter().any(|action| &action.id == *id))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!("缺少动作：{}", missing.join("、")));
+    }
+
+    Ok(())
 }
 
 fn require_language_code(value: &str, field: &str) -> Result<String, String> {
@@ -175,6 +281,7 @@ impl Default for AppConfig {
             source_lang: "auto".to_string(),
             target_lang: "zh".to_string(),
             active_provider: "openai".to_string(),
+            actions: default_actions(),
             mouse_trigger_button: default_mouse_trigger_button(),
             providers: vec![
                 ProviderConfig {
@@ -692,6 +799,110 @@ mod tests {
             serde_json::from_str::<AppConfig>(json).is_err(),
             "only compat::from_str_compat may accept snake_case keys"
         );
+    }
+
+    #[test]
+    fn the_default_action_prompts_carry_the_selection_and_a_language_name() {
+        use crate::translate::prompt::{format_prompt, PromptVars};
+
+        let actions = default_actions();
+        validate_actions(&actions).expect("the shipped prompts must be valid");
+
+        for action in &actions {
+            let rendered = format_prompt(
+                &action.prompt,
+                &PromptVars {
+                    from: "en",
+                    to: "zh",
+                    text: "hello world",
+                },
+            );
+
+            assert!(
+                rendered.contains("hello world"),
+                "{} never sees the selection: {rendered}",
+                action.id
+            );
+            assert!(
+                rendered.contains("Chinese"),
+                "{} renders the language as a name, not a code: {rendered}",
+                action.id
+            );
+            assert!(
+                !rendered.contains('{'),
+                "{} left a placeholder behind: {rendered}",
+                action.id
+            );
+        }
+    }
+
+    /// A prompt with no `{text}` never sees the selection, and the symptom is an
+    /// answer about nothing rather than an error.
+    #[test]
+    fn an_action_prompt_without_the_text_placeholder_is_refused() {
+        let mut actions = default_actions();
+        actions[0].prompt = "Explain this.".to_string();
+
+        let error = validate_actions(&actions).unwrap_err();
+        assert!(error.contains("{text}"), "got: {error}");
+    }
+
+    #[test]
+    fn an_unknown_action_id_is_refused() {
+        let mut actions = default_actions();
+        actions[0].id = "translate-twice".to_string();
+
+        let error = validate_actions(&actions).unwrap_err();
+        assert!(error.contains("translate-twice"), "got: {error}");
+    }
+
+    /// Dropping one would take its button off the popup with no explanation.
+    #[test]
+    fn a_missing_action_is_refused() {
+        let mut actions = default_actions();
+        actions.retain(|action| action.id != "polish");
+
+        let error = validate_actions(&actions).unwrap_err();
+        assert!(error.contains("polish"), "got: {error}");
+    }
+
+    #[test]
+    fn the_patch_refuses_an_action_list_that_would_break_the_popup() {
+        let mut config = AppConfig::default();
+        let mut actions = default_actions();
+        actions[1].prompt = "no placeholder here".to_string();
+
+        let patch = ConfigPatch {
+            actions: Some(actions),
+            ..ConfigPatch::default()
+        };
+
+        assert!(patch.apply_to(&mut config).is_err());
+        assert_eq!(
+            config.actions,
+            default_actions(),
+            "a refused patch must not half-apply"
+        );
+    }
+
+    /// A config written before the actions existed has no `actions` key, and has
+    /// to gain the defaults rather than failing to parse — which would show up
+    /// as the app forgetting every setting the user had.
+    #[test]
+    fn a_config_from_before_actions_existed_still_loads() {
+        let json = r#"{
+            "version": 2,
+            "enabled": true,
+            "sourceLang": "auto",
+            "targetLang": "ja",
+            "activeProvider": "openai",
+            "providers": []
+        }"#;
+
+        let loaded: AppConfig = crate::compat::from_str_compat(json).expect("it must load");
+
+        assert_eq!(loaded.target_lang, "ja", "the old settings survive");
+        assert_eq!(loaded.actions, default_actions(), "and the actions appear");
     }
 
     #[test]

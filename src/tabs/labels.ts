@@ -1,4 +1,14 @@
 /**
+ * What things are called on screen.
+ *
+ * The *sets* come from Rust — which languages a prompt can be built for, which
+ * providers exist, which actions the popup offers — because those are the parts
+ * the backend has to agree with. What each is called in this window is this
+ * window's business, so the names are here. Anything without an entry falls back
+ * to its id rather than disappearing.
+ */
+
+/**
  * Chinese labels for the language codes.
  *
  * The *set* of languages comes from Rust, which is the only place that knows
@@ -46,4 +56,16 @@ const PROVIDERS: Record<string, string> = {
 
 export function providerLabel(name: string): string {
   return PROVIDERS[name] ?? name;
+}
+
+/** The popup's extra actions, by id. */
+const ACTIONS: Record<string, string> = {
+  explain: "解释",
+  summary: "总结",
+  polish: "润色",
+  dict: "词典",
+};
+
+export function actionLabel(id: string): string {
+  return ACTIONS[id] ?? id;
 }

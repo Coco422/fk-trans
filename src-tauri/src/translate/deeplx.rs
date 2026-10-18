@@ -69,6 +69,16 @@ impl DeepLXProvider {
 
 #[async_trait::async_trait]
 impl TranslateProvider for DeepLXProvider {
+    /// DeepLX translates and does nothing else — there is no model behind it to
+    /// ask a question of. Saying so is better than sending the prompt as if it
+    /// were text to translate, which is what used to happen and what produced a
+    /// translation of the instruction.
+    async fn complete(&self, _system: &str, _user: &str) -> Result<String, TranslateError> {
+        Err(TranslateError::Config(
+            "DeepLX 只能翻译，不能执行 AI 动作；请为这个动作指定别的翻译服务".into(),
+        ))
+    }
+
     async fn translate(
         &self,
         text: &str,

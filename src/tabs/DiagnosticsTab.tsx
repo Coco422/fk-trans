@@ -4,7 +4,7 @@ import Badge from "../ui/Badge";
 import Banner from "../ui/Banner";
 import Button from "../ui/Button";
 import { Section } from "../ui/Card";
-import { providerLabel } from "./languages";
+import { providerLabel } from "./labels";
 
 /** Timestamps from Rust are milliseconds since the epoch; config times, seconds. */
 function formatMillis(value?: number | null): string {

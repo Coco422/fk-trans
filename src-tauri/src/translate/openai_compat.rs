@@ -248,27 +248,27 @@ impl OpenAICompatProvider {
     }
 }
 
-#[async_trait::async_trait]
-impl TranslateProvider for OpenAICompatProvider {
-    async fn translate(
-        &self,
-        text: &str,
-        from: &str,
-        to: &str,
-    ) -> Result<TranslateResult, TranslateError> {
+impl OpenAICompatProvider {
+    /// One round trip to `/chat/completions`, with the messages already written.
+    ///
+    /// Both entry points below come through here, so a change to the request or
+    /// to the way the answer is read cannot apply to one and not the other.
+    async fn chat(&self, system: &str, user: &str) -> Result<String, TranslateError> {
         if self.model.trim().is_empty() {
             return Err(TranslateError::Config(
                 "No model configured for this provider".into(),
             ));
         }
 
-        let vars = PromptVars { from, to, text };
+        let mut messages = Vec::with_capacity(2);
+        if !system.trim().is_empty() {
+            messages.push(serde_json::json!({ "role": "system", "content": system }));
+        }
+        messages.push(serde_json::json!({ "role": "user", "content": user }));
+
         let mut body = serde_json::json!({
             "model": self.model,
-            "messages": [
-                { "role": "system", "content": format_prompt(&self.system_prompt, &vars) },
-                { "role": "user", "content": format_prompt(&self.user_prompt, &vars) }
-            ],
+            "messages": messages,
             "temperature": 0.3,
             "max_tokens": 2048
         });
@@ -297,8 +297,26 @@ impl TranslateProvider for OpenAICompatProvider {
             response.body().len()
         );
 
-        let json = response.json()?;
-        let translated = Self::extract_translated(&json)?;
+        Self::extract_translated(&response.json()?)
+    }
+}
+
+#[async_trait::async_trait]
+impl TranslateProvider for OpenAICompatProvider {
+    async fn translate(
+        &self,
+        text: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<TranslateResult, TranslateError> {
+        let vars = PromptVars { from, to, text };
+
+        let translated = self
+            .chat(
+                &format_prompt(&self.system_prompt, &vars),
+                &format_prompt(&self.user_prompt, &vars),
+            )
+            .await?;
 
         Ok(TranslateResult {
             original: text.to_string(),
@@ -307,6 +325,10 @@ impl TranslateProvider for OpenAICompatProvider {
             target_lang: to.to_string(),
             provider: self.label.clone(),
         })
+    }
+
+    async fn complete(&self, system: &str, user: &str) -> Result<String, TranslateError> {
+        self.chat(system, user).await
     }
 }
 

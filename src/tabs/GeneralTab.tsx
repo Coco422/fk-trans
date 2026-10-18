@@ -9,7 +9,7 @@ import Button from "../ui/Button";
 import Card, { Section } from "../ui/Card";
 import Field, { Select } from "../ui/Field";
 import Toggle from "../ui/Toggle";
-import { languageLabel, providerLabel } from "./languages";
+import { languageLabel, providerLabel } from "./labels";
 
 type UpdateStatus =
   | { status: "idle" }

@@ -8,15 +8,17 @@ import {
   type TranslationReadyPayload,
   writeClipboard,
 } from "../api/commands";
+import { actionLabel } from "../tabs/labels";
 import TriggerDot from "./TriggerDot";
 
-/** Extra things the user can ask for about the selected text. */
-const ACTIONS = [
-  { id: "explain", label: "解释" },
-  { id: "summary", label: "总结" },
-  { id: "polish", label: "润色" },
-  { id: "dict", label: "词典" },
-] as const;
+/**
+ * Extra things the user can ask for about the selected text.
+ *
+ * Only the ids live here. Which prompts those ids stand for, and which service
+ * each is sent to, are settings — Rust owns them, and `actionLabel` is where the
+ * id becomes something to read.
+ */
+const ACTIONS = ["explain", "summary", "polish", "dict"] as const;
 
 const AUTO_HIDE_MS = 30_000;
 
@@ -311,20 +313,20 @@ export default function FloatingPopup() {
 
               <div class="mt-3 flex gap-1.5 border-t border-line pt-3">
                 <For each={ACTIONS}>
-                  {(action) => (
+                  {(id) => (
                     <button
                       type="button"
                       class="cursor-pointer rounded-lg bg-raised px-2.5 py-1 text-xs text-ink transition-colors hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-50"
                       disabled={actionLoading() !== null}
-                      onClick={() => handleAction(action.id)}
+                      onClick={() => handleAction(id)}
                     >
-                      {actionLoading() === action.id ? (
+                      {actionLoading() === id ? (
                         <span class="inline-flex items-center gap-1">
                           <span class="inline-block h-3 w-3 animate-spin rounded-full border border-line border-t-transparent" />
-                          {action.label}
+                          {actionLabel(id)}
                         </span>
                       ) : (
-                        action.label
+                        actionLabel(id)
                       )}
                     </button>
                   )}

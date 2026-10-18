@@ -1,5 +1,5 @@
 import type { JSX } from "solid-js";
-import { Show } from "solid-js";
+import { createEffect, Show } from "solid-js";
 import { cx } from "./cx";
 
 /** One control's worth of layout: a label, the control, and an explanation. */
@@ -76,9 +76,29 @@ export function Select<T extends string>(props: {
   disabled?: boolean;
   onChange: (value: T) => void;
 }) {
+  let element: HTMLSelectElement | undefined;
+
+  /*
+   * A `<select>` cannot hold a value that has no matching `<option>` yet, and it
+   * does not recover when they arrive: it falls back to showing the first one.
+   * That is not a hypothetical — the language lists here are fetched, so for one
+   * frame the target-language select had no options, and afterwards it displayed
+   * 英语 while the config said `zh` and every translation came out Chinese.
+   *
+   * Reading the options inside the effect is what makes this re-run once they
+   * are there.
+   */
+  createEffect(() => {
+    const wanted = props.value;
+    void props.options.length;
+    if (element && element.value !== wanted) {
+      element.value = wanted;
+    }
+  });
+
   return (
     <select
-      value={props.value}
+      ref={element}
       disabled={props.disabled}
       onChange={(event) => props.onChange(event.currentTarget.value as T)}
       class={cx(CONTROL, "h-8 cursor-pointer pr-1")}

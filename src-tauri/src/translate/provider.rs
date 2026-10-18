@@ -48,4 +48,16 @@ pub trait TranslateProvider: Send + Sync {
         from: &str,
         to: &str,
     ) -> Result<TranslateResult, TranslateError>;
+
+    /// Ask the model something that is not a translation.
+    ///
+    /// Separate from `translate` because a prompt is an instruction, not text to
+    /// be translated. The popup's actions used to go through `translate`, which
+    /// wrapped the instruction in the translation template — so the model was
+    /// asked to translate its own instruction, and answered with a translation
+    /// of it.
+    ///
+    /// `system` may be empty, which means the provider should send no system
+    /// message at all rather than an empty one.
+    async fn complete(&self, system: &str, user: &str) -> Result<String, TranslateError>;
 }
