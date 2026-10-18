@@ -29,6 +29,68 @@ const POINT_GAP: f64 = 6.0;
 const CARD_GAP: f64 = 8.0;
 const SCREEN_MARGIN: f64 = 8.0;
 
+/// The largest share of a display a text selection can plausibly cover.
+///
+/// Some apps — web areas in particular — answer `AXBoundsForRange` with the
+/// bounds of the *element* rather than of the range, which is the whole page.
+/// Placing the point at the far corner of that puts it in the corner of the
+/// screen, which is exactly where it used to end up.
+const MOST_OF_A_DISPLAY: f64 = 0.6;
+
+/// How far outside a selection the pointer may sit and still count as part of
+/// the gesture that made it.
+const POINTER_SLACK: f64 = 12.0;
+
+/// The rectangle the trigger point should be placed against.
+///
+/// That is the selection's own rectangle when the app gave a believable one, and
+/// a zero-sized rectangle at the pointer otherwise. Both go through the same
+/// placement rules, so a point at the pointer behaves exactly like a point
+/// beside a one-character selection.
+///
+/// Separated from [`Panel::show_point`] so the caller can say which of the two it
+/// used, which is the first thing worth knowing when a point lands somewhere
+/// surprising.
+pub fn anchor_rect(
+    bounds: Option<ScreenRect>,
+    pointer: Point,
+    work_area: ScreenRect,
+) -> ScreenRect {
+    bounds
+        .filter(|rect| is_plausible_selection(*rect, pointer, work_area))
+        .unwrap_or(ScreenRect {
+            x: pointer.x,
+            y: pointer.y,
+            width: 0.0,
+            height: 0.0,
+        })
+}
+
+/// Whether an Accessibility rectangle is believable as the selection itself.
+///
+/// Two things have to hold: it has to be a small part of the display, and it has
+/// to be where the pointer that made it is. A rectangle that fails either is
+/// discarded in favour of the pointer, which is always right about where the
+/// user is looking — so the cost of getting this wrong is a slightly worse
+/// position, never a point in the corner of the screen.
+fn is_plausible_selection(rect: ScreenRect, pointer: Point, work_area: ScreenRect) -> bool {
+    if rect.width > work_area.width * MOST_OF_A_DISPLAY
+        && rect.height > work_area.height * MOST_OF_A_DISPLAY
+    {
+        return false;
+    }
+
+    // A selection can be a few points narrower than the pointer's own position,
+    // so the check is made against a slightly grown rectangle.
+    ScreenRect {
+        x: rect.x - POINTER_SLACK,
+        y: rect.y - POINTER_SLACK,
+        width: rect.width + 2.0 * POINTER_SLACK,
+        height: rect.height + 2.0 * POINTER_SLACK,
+    }
+    .contains((pointer.x, pointer.y))
+}
+
 /// How long the point waits to be clicked.
 ///
 /// Short, because an unclicked point is stale: the user has read the selection,
@@ -146,27 +208,19 @@ impl Panel {
 
     /// Show the trigger point for a selection.
     ///
-    /// `bounds` is where the app says the selection is, which it often will not
-    /// say; `pointer` is then used instead, which is where the user finished
-    /// selecting. Both go through the same placement rules, so the point flips to
-    /// the other side of the screen edge either way.
+    /// `rect` is what to place the point against — see [`anchor_rect`], which is
+    /// where the decision about trusting the app's geometry lives.
+    ///
+    /// `selection` may be empty. The point appears either way: what is selected
+    /// is only needed when the user clicks it, and an app that will not describe
+    /// its selection is exactly the case the pasteboard fallback is for.
     pub fn show_point(
         &mut self,
-        bounds: Option<ScreenRect>,
-        pointer: Point,
+        rect: ScreenRect,
         work_area: ScreenRect,
         selection: String,
         now_ms: i64,
     ) -> Transition {
-        // A selection with no rectangle is a selection with no width, at the
-        // pointer — which the placement rules already handle.
-        let rect = bounds.unwrap_or(ScreenRect {
-            x: pointer.x,
-            y: pointer.y,
-            width: 0.0,
-            height: 0.0,
-        });
-
         self.anchor = placement::trigger_point(
             rect,
             POINT_SIZE,
@@ -343,8 +397,7 @@ mod tests {
     fn pointed() -> Panel {
         let mut panel = Panel::new();
         panel.show_point(
-            Some(selection(100.0, 200.0, 120.0, 18.0)),
-            pointer_at(220.0, 218.0),
+            selection(100.0, 200.0, 120.0, 18.0),
             work_area(),
             "hello world".to_string(),
             1_000,
@@ -381,8 +434,7 @@ mod tests {
     fn without_a_rectangle_the_point_uses_the_pointer() {
         let mut panel = Panel::new();
         panel.show_point(
-            None,
-            pointer_at(300.0, 400.0),
+            anchor_rect(None, pointer_at(300.0, 400.0), work_area()),
             work_area(),
             "text".to_string(),
             1_000,
@@ -403,8 +455,11 @@ mod tests {
     fn the_point_flips_left_near_the_right_edge() {
         let mut panel = Panel::new();
         panel.show_point(
-            Some(selection(1400.0, 200.0, 100.0, 18.0)),
-            pointer_at(1500.0, 218.0),
+            anchor_rect(
+                Some(selection(1400.0, 200.0, 100.0, 18.0)),
+                pointer_at(1500.0, 218.0),
+                work_area(),
+            ),
             work_area(),
             "text".to_string(),
             1_000,
@@ -487,8 +542,11 @@ mod tests {
     fn a_card_near_the_bottom_edge_opens_upwards() {
         let mut panel = Panel::new();
         panel.show_point(
-            Some(selection(100.0, 900.0, 120.0, 18.0)),
-            pointer_at(220.0, 918.0),
+            anchor_rect(
+                Some(selection(100.0, 900.0, 120.0, 18.0)),
+                pointer_at(220.0, 918.0),
+                work_area(),
+            ),
             work_area(),
             "text".to_string(),
             1_000,
@@ -553,7 +611,12 @@ mod tests {
         let mut panel = Panel::new();
         let start = panel.generation();
 
-        panel.show_point(None, pointer_at(0.0, 0.0), work_area(), "a".to_string(), 0);
+        panel.show_point(
+            anchor_rect(None, pointer_at(0.0, 0.0), work_area()),
+            work_area(),
+            "a".to_string(),
+            0,
+        );
         let after_point = panel.generation();
         assert_ne!(after_point, start);
 
@@ -587,8 +650,11 @@ mod tests {
         let first = panel.generation();
 
         panel.show_point(
-            Some(selection(10.0, 20.0, 30.0, 12.0)),
-            pointer_at(40.0, 32.0),
+            anchor_rect(
+                Some(selection(10.0, 20.0, 30.0, 12.0)),
+                pointer_at(40.0, 32.0),
+                work_area(),
+            ),
             work_area(),
             "second".to_string(),
             2_000,
@@ -648,6 +714,53 @@ mod tests {
     fn a_scroll_dismisses_the_point_from_anywhere() {
         let mut panel = pointed();
         assert_eq!(panel.dismiss_point(None), Transition::Hide);
+    }
+
+    /// The case that put the point in the corner of the screen: a web area
+    /// answering with the bounds of the whole page instead of the range.
+    #[test]
+    fn a_rectangle_the_size_of_the_display_is_not_the_selection() {
+        let mut panel = Panel::new();
+        let pointer = pointer_at(721.0, 279.0);
+
+        let rect = anchor_rect(Some(selection(0.0, 0.0, 1470.0, 956.0)), pointer, work_area());
+        assert_eq!(rect, selection(pointer.x, pointer.y, 0.0, 0.0), "the pointer, not the page");
+
+        panel.show_point(rect, work_area(), "text".to_string(), 1_000);
+
+        let origin = panel.placement().origin;
+        assert_eq!(origin.x, pointer.x + POINT_GAP);
+        assert_eq!(origin.y, pointer.y + POINT_GAP);
+    }
+
+    /// A rectangle somewhere else entirely is not this selection either.
+    #[test]
+    fn a_rectangle_the_pointer_is_nowhere_near_is_not_the_selection() {
+        let mut panel = Panel::new();
+        let pointer = pointer_at(721.0, 279.0);
+
+        panel.show_point(
+            anchor_rect(Some(selection(100.0, 700.0, 60.0, 14.0)), pointer, work_area()),
+            work_area(),
+            "text".to_string(),
+            1_000,
+        );
+
+        assert_eq!(panel.placement().origin.x, pointer.x + POINT_GAP);
+    }
+
+    /// A rectangle that is plausible is used, because it puts the point at the
+    /// corner of the words rather than wherever the pointer happens to be.
+    #[test]
+    fn a_plausible_rectangle_is_preferred_over_the_pointer() {
+        let mut panel = Panel::new();
+        // The pointer sits inside the word it just selected.
+        let pointer = pointer_at(150.0, 210.0);
+
+        let rect = anchor_rect(Some(selection(100.0, 200.0, 120.0, 18.0)), pointer, work_area());
+        panel.show_point(rect, work_area(), "text".to_string(), 1_000);
+
+        assert_eq!(panel.placement().origin.x, 100.0 + 120.0 + POINT_GAP);
     }
 
     /// The gaps and margins all take space away from the card, which is the

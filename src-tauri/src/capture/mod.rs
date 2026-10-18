@@ -129,16 +129,23 @@ impl CaptureOutcome {
 
 /// Whether the pasteboard is worth trying after Accessibility failed.
 ///
-/// The distinction that matters is between "this app cannot tell me its
-/// selection" — where Cmd+C is exactly the right fallback — and the cases where
-/// Cmd+C would be pointless or wrong:
+/// The distinction is between "this app cannot tell me its selection" — where
+/// Cmd+C is exactly the right fallback — and the cases where Cmd+C cannot work
+/// or should not be sent:
 ///
 /// * **No permission**: synthesising Cmd+C needs the same permission, so the
 ///   fallback cannot work either. Asking would just fail twice.
-/// * **Nothing focused / nothing selected**: there is no selection for Cmd+C to
-///   copy. Pressing it anyway can copy something unrelated, or nothing.
+/// * **Nothing focused**: there is nothing to send a copy to.
 /// * **Busy** (`Blocked`): the app is mid-something. Copying into it now is a
-///   coin flip, and the next middle-click will re-read cleanly.
+///   coin flip, and the next trigger will re-read cleanly.
+///
+/// `NoSelection` deliberately *does* fall back, which it did not before. The
+/// signal is indistinguishable from the one a terminal gives: Ghostty and
+/// Terminal support `AXSelectedText` and answer it with an empty string, so
+/// "the selection is empty" and "this app will not describe its selection" are
+/// the same answer. Cmd+C settles it in one step — if there really is nothing
+/// selected, the pasteboard does not change and the attempt costs a snapshot
+/// and a restore, which is what the fallback already does on every path.
 ///
 /// Pure, and deliberately exhaustive: a new `Failure` variant will not compile
 /// until someone decides what it means here.
@@ -147,9 +154,12 @@ pub fn should_fall_back_to_pasteboard(failure: &Failure) -> bool {
         // The app does not implement the attribute, but it will still handle a
         // copy — this is the case the fallback exists for.
         Failure::Unsupported => true,
+        // The attribute is there and empty. Terminals answer exactly this way,
+        // so it cannot be read as "the user selected nothing".
+        Failure::NoSelection => true,
         // An error we do not recognise: try, and let the attempt be recorded.
         Failure::Other { .. } => true,
-        Failure::NotTrusted | Failure::NoFocusedElement | Failure::NoSelection | Failure::Blocked { .. } => false,
+        Failure::NotTrusted | Failure::NoFocusedElement | Failure::Blocked { .. } => false,
     }
 }
 
@@ -227,10 +237,11 @@ fn why_not_pasteboard(failure: &Failure) -> &'static str {
     match failure {
         Failure::NotTrusted => "without Accessibility permission a synthesised copy cannot work either",
         Failure::NoFocusedElement => "nothing is focused, so there is nothing to copy",
-        Failure::NoSelection => "nothing is selected, so there is nothing to copy",
         Failure::Blocked { .. } => "the app was busy; the next trigger will try again",
         // Only reachable if the caller disallowed the fallback; kept exhaustive.
-        Failure::Unsupported | Failure::Other { .. } => "the pasteboard was not tried",
+        Failure::Unsupported | Failure::NoSelection | Failure::Other { .. } => {
+            "the pasteboard was not tried"
+        }
     }
 }
 
@@ -259,11 +270,17 @@ mod tests {
         assert!(!should_fall_back_to_pasteboard(&Failure::NotTrusted));
     }
 
-    /// Nothing is selected, so there is nothing for Cmd+C to copy — and pressing
-    /// it can copy something unrelated instead.
+    /// The case that made middle-click useless in every terminal: the app says
+    /// its selection is empty, which is the same answer it gives when it simply
+    /// will not describe the selection. Only Cmd+C can tell the two apart.
     #[test]
-    fn no_selection_does_not_fall_back() {
-        assert!(!should_fall_back_to_pasteboard(&Failure::NoSelection));
+    fn an_empty_selection_still_falls_back() {
+        assert!(should_fall_back_to_pasteboard(&Failure::NoSelection));
+    }
+
+    /// Nothing is focused, so there is no element to send a copy to at all.
+    #[test]
+    fn nothing_focused_does_not_fall_back() {
         assert!(!should_fall_back_to_pasteboard(&Failure::NoFocusedElement));
     }
 

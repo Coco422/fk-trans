@@ -70,6 +70,10 @@ pub struct AppState {
     /// when that failed, in which case the popup still works but behaves like an
     /// ordinary window: it activates the app when clicked.
     pub panel_window: Mutex<Option<macos::panel::TriggerPanelWindow>>,
+    /// Shared so the trigger point can fall back to a clipboard capture when it
+    /// is clicked, which is the only way to read a selection in an app that will
+    /// not describe one.
+    pub clipboard: Arc<clipboard::manager::ClipboardManager>,
     /// Whether the popup became a panel at startup. Reported in Diagnostics
     /// because the fallback is silent and its symptom — the trigger point
     /// taking focus away from the app being read — looks like a different bug.
@@ -233,13 +237,26 @@ fn show_trigger_point(
 
     let now = mouse::listener::now_millis();
 
+    // Which rectangle the point is placed against is worth saying out loud: a
+    // point in an unexpected place is the first symptom of an app answering with
+    // the bounds of the whole page rather than of the selection.
+    let rect = trigger::panel::anchor_rect(bounds, pointer, work_area);
+    log::info!(
+        "[panel] Anchoring the trigger point to the {}",
+        if rect.width > 0.0 {
+            "selection"
+        } else {
+            "pointer (no usable selection rectangle)"
+        }
+    );
+
     let transition = {
         let state = app.state::<AppState>();
         let mut panel = state
             .trigger_panel
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        panel.show_point(bounds, pointer, work_area, text, now)
+        panel.show_point(rect, work_area, text, now)
     };
 
     apply_panel(app, transition);
@@ -456,25 +473,44 @@ async fn run_translation_pipeline(
     let capture_note = capture.summary();
     log::info!("[pipeline] Capture: {capture_note}");
 
+    if is_selection_source {
+        // The point appears whether or not the text could be read, and whatever
+        // was read is carried to the click. An app that will not describe its
+        // selection — every terminal — is exactly the case the pasteboard
+        // fallback exists for, and that fallback only becomes fair game once the
+        // user has asked for a translation. So it happens then, not now.
+        let (text, bounds) = match capture.captured {
+            Some(captured) => (captured.text, captured.bounds),
+            None => (String::new(), None),
+        };
+        let char_count = text.chars().count();
+
+        show_trigger_point(&app, cursor_pos, bounds, text);
+
+        mouse::listener::mark_pipeline_result(
+            &state.mouse_trigger_state,
+            if char_count > 0 {
+                format!("就绪：已选中 {char_count} 个字符，等待点击触发点")
+            } else {
+                "就绪：等点击触发点（此刻还读不到选中的文字）".to_string()
+            },
+            Some(capture_note),
+        );
+        emit_mouse_trigger_state(&app);
+        return;
+    }
+
     let Some(captured) = capture.captured else {
         log::warn!("[pipeline] No text captured, skipping: {capture_note}");
-        if is_selection_source {
-            mouse::listener::mark_pipeline_result(
-                &state.mouse_trigger_state,
-                "已忽略：划词没有取到文字",
-                Some(capture_note),
-            );
-        } else {
-            let _ = app.emit(
-                "translation-error",
-                "没有取到选中的文字，请先在别的应用里选中文字再试。".to_string(),
-            );
-            mouse::listener::mark_pipeline_result(
-                &state.mouse_trigger_state,
-                "失败：没有取到选中的文字",
-                Some(capture_note),
-            );
-        }
+        let _ = app.emit(
+            "translation-error",
+            "没有取到选中的文字，请先在别的应用里选中文字再试。".to_string(),
+        );
+        mouse::listener::mark_pipeline_result(
+            &state.mouse_trigger_state,
+            "失败：没有取到选中的文字",
+            Some(capture_note),
+        );
         emit_mouse_trigger_state(&app);
         return;
     };
@@ -486,23 +522,6 @@ async fn run_translation_pipeline(
         text.chars().count(),
         text_hash(&text)
     );
-
-    if is_selection_source {
-        // A selection shows a trigger point and stops. Deliberately after the
-        // capture, not before: only now do we know where the selection is, and a
-        // point that appears at the pointer and then jumps is worse than one that
-        // appears in the right place.
-        let char_count = text.chars().count();
-        show_trigger_point(&app, cursor_pos, captured.bounds, text);
-
-        mouse::listener::mark_pipeline_result(
-            &state.mouse_trigger_state,
-            format!("就绪：已选中 {char_count} 个字符，等待点击触发点"),
-            None,
-        );
-        emit_mouse_trigger_state(&app);
-        return;
-    }
 
     translate_and_show(&app, text, guard).await;
 }
@@ -646,6 +665,10 @@ pub fn run() {
 
             let pipeline_gate = Arc::new(pipeline::PipelineGate::default());
 
+            // Shared clipboard manager. It lives in the app state rather than in
+            // a closure because the click on the trigger point needs it too.
+            let clipboard_manager = Arc::new(clipboard::manager::ClipboardManager::new());
+
             // The popup becomes a real panel before anything can show it, so no
             // window is ever on screen in the state that activates the app.
             let panel_window = macos::panel::TriggerPanelWindow::adopt(app.handle());
@@ -665,6 +688,7 @@ pub fn run() {
                 pipeline_gate: pipeline_gate.clone(),
                 config_load_problem,
                 config_notices,
+                clipboard: clipboard_manager.clone(),
                 trigger_panel: Mutex::new(trigger::panel::Panel::new()),
                 trigger_panel_active: panel_window.is_some(),
                 panel_window: Mutex::new(panel_window),
@@ -674,9 +698,6 @@ pub fn run() {
             if let Err(e) = tray::menu::create_tray(app.handle()) {
                 log::error!("[tray] Failed to create tray: {}", e);
             }
-
-            // Shared clipboard manager
-            let clipboard_manager = Arc::new(clipboard::manager::ClipboardManager::new());
 
             // --- Mouse listener pipeline ---
             let app_handle = app.handle().clone();

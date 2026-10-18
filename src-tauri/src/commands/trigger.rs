@@ -36,13 +36,29 @@ pub async fn expand_trigger_panel(app: AppHandle) -> Result<(), String> {
     apply_panel(&app, transition);
     let _ = app.emit("translation-started", ());
 
-    // The card is already open and showing its loading state, so a refusal here
-    // has to say so. Returning the error alone would leave it loading until the
-    // idle timer closed it.
-    if text.trim().is_empty() {
-        let _ = app.emit("translation-error", "没有可翻译的内容".to_string());
-        return Err("the selection was empty".to_string());
-    }
+    // Nothing could be read when the point appeared, which is what every app
+    // that will not describe its selection looks like — terminals, mostly. Only
+    // now that the user has asked is a clipboard capture fair: it takes the
+    // clipboard over for a moment, and doing that before they asked would be
+    // taking something that was never ours to take.
+    let text = if text.trim().is_empty() {
+        let clipboard = state.clipboard.clone();
+        match crate::capture::capture_selection(&clipboard, true)
+            .await
+            .captured
+        {
+            Some(captured) => captured.text,
+            None => {
+                // The card is already open and showing its loading state, so a
+                // refusal has to say so; the error alone would leave it loading
+                // until the idle timer closed it.
+                let _ = app.emit("translation-error", "没有取到选中的文字".to_string());
+                return Err("the selection could not be read".to_string());
+            }
+        }
+    } else {
+        text
+    };
 
     let Some(gate) = acquire_pipeline_gate(&app, &state.pipeline_gate) else {
         let _ = app.emit(
