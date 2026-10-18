@@ -57,7 +57,15 @@ impl ScreenRect {
         self.y + self.height
     }
 
-    fn from_cg(rect: CGRect) -> Self {
+    /// Whether a point falls inside, in the same coordinate space.
+    pub fn contains(&self, point: (f64, f64)) -> bool {
+        point.0 >= self.x
+            && point.0 <= self.right()
+            && point.1 >= self.y
+            && point.1 <= self.bottom()
+    }
+
+    pub(crate) fn from_cg(rect: CGRect) -> Self {
         Self {
             x: rect.origin.x,
             y: rect.origin.y,
@@ -345,6 +353,22 @@ mod tests {
         let failure = classify(-99999);
         assert_eq!(failure.label(), "other");
         assert_eq!(failure.detail(), Some("unknown error"));
+    }
+
+    #[test]
+    fn a_rect_knows_what_is_inside_it() {
+        let rect = ScreenRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 50.0,
+        };
+
+        assert!(rect.contains((0.0, 0.0)), "the top-left corner is inside");
+        assert!(rect.contains((100.0, 50.0)), "and so is the bottom-right");
+        assert!(rect.contains((50.0, 25.0)));
+        assert!(!rect.contains((-1.0, 25.0)));
+        assert!(!rect.contains((50.0, 51.0)));
     }
 
     #[test]

@@ -151,58 +151,28 @@ fn current_cursor_position(app: &tauri::AppHandle) -> PhysicalPosition<f64> {
     }
 }
 
-/// The scale factor of the display the pointer is on.
+/// Where the pointer is, in the logical points the panel is placed in, and the
+/// usable area of the display it is on.
 ///
-/// Accessibility and Tauri both express logical positions in points, but Tauri
-/// reports the pointer in physical pixels, so the pointer has to be converted
-/// back before it can be used as a logical anchor.
-fn scale_factor_at(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) -> f64 {
-    any_window(app)
-        .and_then(|window| window.monitor_from_point(cursor.x, cursor.y).ok().flatten())
-        .map(|monitor| monitor.scale_factor())
-        .unwrap_or(1.0)
-}
-
-/// Somewhere to ask the questions Tauri will only answer about a window —
-/// which display a point is on, and how it scales. Which window is asked does
-/// not matter, and neither does whether it is visible.
-fn any_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
-    app.get_webview_window("popup")
-        .or_else(|| app.get_webview_window("main"))
-}
-
-/// The usable area of the display the pointer is on, in logical points.
+/// Resolved together because each needs the other: the pointer arrives in
+/// physical pixels, and turning those into points needs the scale factor of the
+/// display the pointer is on.
 ///
-/// Taken from the pointer rather than from the selection, because a selection is
-/// on the display the pointer that made it is on, and the pointer is the one
-/// Tauri can answer questions about in physical coordinates.
-fn work_area_at(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) -> Option<ScreenRect> {
-    let monitor = any_window(app)?
-        .monitor_from_point(cursor.x, cursor.y)
-        .ok()
-        .flatten()?;
+/// This goes through AppKit rather than Tauri's `monitor_from_point`, which
+/// compares against a rectangle in points while documenting its argument as
+/// physical pixels — so on a Retina display it never finds anything, and the
+/// trigger point was never placed at all. See `macos::screen`.
+fn pointer_and_display(cursor: PhysicalPosition<f64>) -> Option<(Point, ScreenRect)> {
+    let display = macos::screen::display_at((cursor.x, cursor.y))?;
+    let logical = cursor.to_logical::<f64>(display.scale);
 
-    // Each half converts on its own: `PhysicalRect` has no conversion of its own,
-    // because a position and a size do not scale the same way (`ceil` vs `floor`).
-    let area = monitor.work_area();
-    let scale = monitor.scale_factor();
-    let position = area.position.to_logical::<f64>(scale);
-    let size = area.size.to_logical::<f64>(scale);
-
-    Some(ScreenRect {
-        x: position.x,
-        y: position.y,
-        width: size.width,
-        height: size.height,
-    })
-}
-
-fn pointer_in_points(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) -> Point {
-    let logical = cursor.to_logical::<f64>(scale_factor_at(app, cursor));
-    Point {
-        x: logical.x,
-        y: logical.y,
-    }
+    Some((
+        Point {
+            x: logical.x,
+            y: logical.y,
+        },
+        display.work_area,
+    ))
 }
 
 /// Run a transition from the panel state machine against the real window.
@@ -225,12 +195,11 @@ pub(crate) fn apply_panel(app: &tauri::AppHandle, transition: trigger::panel::Tr
 /// for a translation, so the card goes up immediately and the loading state is
 /// visible while it is fetched.
 fn show_translation_card(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
-    let Some(work_area) = work_area_at(app, cursor) else {
-        log::warn!("[panel] Could not read the display's work area");
+    let Some((pointer, work_area)) = pointer_and_display(cursor) else {
+        log::warn!("[panel] Could not work out which display the pointer is on");
         return;
     };
 
-    let pointer = pointer_in_points(app, cursor);
     let now = mouse::listener::now_millis();
 
     let transition = {
@@ -257,12 +226,11 @@ fn show_trigger_point(
     bounds: Option<ScreenRect>,
     text: String,
 ) {
-    let Some(work_area) = work_area_at(app, cursor) else {
-        log::warn!("[panel] Could not read the display's work area");
+    let Some((pointer, work_area)) = pointer_and_display(cursor) else {
+        log::warn!("[panel] Could not work out which display the pointer is on");
         return;
     };
 
-    let pointer = pointer_in_points(app, cursor);
     let now = mouse::listener::now_millis();
 
     let transition = {
