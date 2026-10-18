@@ -272,10 +272,10 @@ mod tests {
     #[test]
     fn a_response_without_a_translation_is_an_error() {
         for missing in [None, Some(String::new()), Some("   \n ".to_string())] {
-            let error = require_translation(missing, "gemini", || "top_level_keys=foo".to_string())
+            let error = require_translation(missing, "openai", || "top_level_keys=foo".to_string())
                 .expect_err("an empty translation must not be success");
             let message = error.to_string();
-            assert!(message.contains("gemini"), "got: {message}");
+            assert!(message.contains("openai"), "got: {message}");
             assert!(message.contains("no translation"), "got: {message}");
             assert!(message.contains("top_level_keys=foo"), "got: {message}");
         }
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn a_response_with_a_translation_is_returned_unchanged() {
-        let text = require_translation(Some("你好，世界".to_string()), "gemini", || unreachable!())
+        let text = require_translation(Some("你好，世界".to_string()), "openai", || unreachable!())
             .expect("a real translation");
         assert_eq!(text, "你好，世界");
     }

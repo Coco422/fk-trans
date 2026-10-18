@@ -285,15 +285,6 @@ impl Default for AppConfig {
             mouse_trigger_button: default_mouse_trigger_button(),
             providers: vec![
                 ProviderConfig {
-                    name: "deeplx".into(),
-                    base_url: "http://127.0.0.1:1188".into(),
-                    api_key: String::new(),
-                    model: String::new(),
-                    system_prompt: String::new(),
-                    user_prompt: String::new(),
-                    extra_params: serde_json::json!({}),
-                },
-                ProviderConfig {
                     name: "openai".into(),
                     base_url: "https://api.openai.com/v1".into(),
                     api_key: String::new(),
@@ -303,24 +294,6 @@ impl Default for AppConfig {
                     extra_params: serde_json::json!({
                         "chat_template_kwargs": { "enable_thinking": false }
                     }),
-                },
-                ProviderConfig {
-                    name: "gemini".into(),
-                    base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
-                    api_key: String::new(),
-                    model: "gemini-2.0-flash".into(),
-                    system_prompt: default_system_prompt(),
-                    user_prompt: default_user_prompt(),
-                    extra_params: serde_json::json!({}),
-                },
-                ProviderConfig {
-                    name: "claude".into(),
-                    base_url: "https://api.anthropic.com".into(),
-                    api_key: String::new(),
-                    model: "claude-haiku-4-5-20251001".into(),
-                    system_prompt: default_system_prompt(),
-                    user_prompt: default_user_prompt(),
-                    extra_params: serde_json::json!({}),
                 },
                 ProviderConfig {
                     name: "ollama".into(),
@@ -387,8 +360,9 @@ pub fn validate_provider(provider: &ProviderConfig) -> Result<(), String> {
         return Err("还没填 Base URL".to_string());
     }
 
-    // DeepLX translates on its own; every other provider needs a model.
-    if name != "deeplx" && is_blank(&provider.model) {
+    // Every provider left is a model endpoint — either a hosted one or Ollama —
+    // so all of them need a model name.
+    if is_blank(&provider.model) {
         return Err("还没填模型".to_string());
     }
 
@@ -515,6 +489,22 @@ pub fn load_config_from(path: &Path) -> ConfigLoad {
             config.version = CURRENT_CONFIG_VERSION;
             normalize_extra_params(&mut config, path);
             let notices = migrate_providers(&mut config, path);
+
+            // A version upgrade is written back on the next save — reading a
+            // file should not rewrite it. A migration is different: what it
+            // changed (an entry removed, the active provider repointed) is not
+            // something the user can put back, so leaving the file alone would
+            // mean reporting the same change on every launch, which is telling
+            // them something just changed when nothing did.
+            if !notices.is_empty() {
+                if let Err(error) = save_config_to(path, &config) {
+                    log::warn!(
+                        "[config] Could not write the migrated config back to {}: {error}",
+                        path.display()
+                    );
+                }
+            }
+
             ConfigLoad {
                 config,
                 problem: None,
@@ -570,12 +560,33 @@ fn migrate_providers(config: &mut AppConfig, path: &Path) -> Vec<String> {
             .retain(|provider| crate::translate::SUPPORTED_PROVIDERS.contains(&provider.name.as_str()));
         for name in removed {
             let notice = format!(
-                "Removed the '{name}' provider entry: it is no longer supported. \
-                 An OpenAI-compatible provider pointed at the same endpoint covers the same case."
+                "已移除 `{name}` 这一项：它不再支持了。指向同一个地址的 OpenAI 兼容服务可以替代它。"
             );
             log::warn!("[config] {}: {}", path.display(), notice);
             notices.push(notice);
         }
+    }
+
+    // A provider that no longer exists cannot go on being the active one. Left
+    // alone it would leave the app unable to translate at all, reporting a
+    // provider the settings window does not even show — which is how a config
+    // that named a removed provider would look exactly like a broken install.
+    if !config
+        .providers
+        .iter()
+        .any(|provider| provider.name == config.active_provider)
+    {
+        let previous = config.active_provider.clone();
+        let fallback = config
+            .providers
+            .first()
+            .map(|provider| provider.name.clone())
+            .unwrap_or_else(|| crate::translate::SUPPORTED_PROVIDERS[0].to_string());
+
+        let notice = format!("当前翻译服务 `{previous}` 已不再支持，已改为 `{fallback}`。");
+        log::warn!("[config] {}: {}", path.display(), notice);
+        config.active_provider = fallback;
+        notices.push(notice);
     }
 
     // Ollama is reached over its OpenAI-compatible endpoint now, so the base URL
@@ -975,13 +986,6 @@ mod tests {
             )],
             ..AppConfig::default()
         };
-        let deeplx = AppConfig {
-            active_provider: "deeplx".to_string(),
-            providers: vec![provider("deeplx", "http://127.0.0.1:1188", "", "")],
-            ..AppConfig::default()
-        };
-
-        assert!(validate_active_provider(&deeplx).is_ok());
         assert!(
             validate_active_provider(&ollama).is_ok(),
             "got: {:?}",
@@ -1032,8 +1036,8 @@ mod tests {
     }
 
     #[test]
-    fn every_provider_needs_a_base_url_and_all_but_deeplx_need_a_model() {
-        for name in ["openai", "ollama", "gemini", "claude"] {
+    fn every_provider_needs_a_base_url_and_a_model() {
+        for name in crate::translate::SUPPORTED_PROVIDERS {
             let no_model = AppConfig {
                 active_provider: name.to_string(),
                 providers: vec![provider(name, "http://127.0.0.1:1/v1", "", "")],
@@ -1042,13 +1046,6 @@ mod tests {
             let error = validate_active_provider(&no_model).expect_err("a model is required");
             assert!(error.contains("模型"), "{name} gave: {error}");
         }
-
-        let deeplx = AppConfig {
-            active_provider: "deeplx".to_string(),
-            providers: vec![provider("deeplx", "http://127.0.0.1:1188", "", "")],
-            ..AppConfig::default()
-        };
-        assert!(validate_active_provider(&deeplx).is_ok());
 
         let no_url = AppConfig {
             active_provider: "ollama".to_string(),
@@ -1072,7 +1069,7 @@ mod tests {
         let error = validate_active_provider(&config).expect_err("custom_http no longer exists");
         assert!(error.contains("未知的翻译服务"), "got: {error}");
         assert!(
-            error.contains("openai") && error.contains("deeplx"),
+            error.contains("openai") && error.contains("ollama"),
             "the message should name what is supported: {error}"
         );
     }
@@ -1172,6 +1169,88 @@ mod tests {
                 loaded.notices[0].contains("custom_http"),
                 "the notice must name what was removed: {}",
                 loaded.notices[0]
+            );
+        }
+
+        /// The notice above is only useful once. Without writing the migration
+        /// back, the file keeps the removed entries and the user is told the same
+        /// thing on every launch.
+        #[test]
+        fn a_migration_is_written_back_so_it_is_reported_only_once() {
+            let dir = TempDir::new("migrate-once");
+            let path = dir.path();
+            fs::write(
+                &path,
+                r#"{
+                    "version": 2,
+                    "enabled": true,
+                    "sourceLang": "auto",
+                    "targetLang": "zh",
+                    "activeProvider": "claude",
+                    "providers": [
+                        { "name": "claude", "baseUrl": "https://api.anthropic.com", "apiKey": "sk-x", "model": "m" },
+                        { "name": "ollama", "baseUrl": "http://127.0.0.1:11434/v1", "apiKey": "", "model": "translategemma:4b" }
+                    ]
+                }"#,
+            )
+            .expect("write");
+
+            let first = load_config_from(&path);
+            assert!(!first.notices.is_empty(), "the first load has news");
+
+            let second = load_config_from(&path);
+
+            assert!(
+                second.notices.is_empty(),
+                "the second load must have nothing to report: {:?}",
+                second.notices
+            );
+            assert_eq!(second.config.active_provider, "ollama");
+            assert_eq!(
+                second.config.providers.len(),
+                1,
+                "and the file must no longer list what was removed"
+            );
+        }
+
+        /// A config naming a provider that has since been removed would leave
+        /// the app unable to translate at all, reporting a provider the settings
+        /// window does not show — indistinguishable from a broken install.
+        #[test]
+        fn an_active_provider_that_no_longer_exists_is_repointed_and_reported() {
+            let dir = TempDir::new("dead-active-provider");
+            let path = dir.path();
+            fs::write(
+                &path,
+                r#"{
+                    "version": 2,
+                    "enabled": true,
+                    "sourceLang": "auto",
+                    "targetLang": "zh",
+                    "activeProvider": "claude",
+                    "providers": [
+                        { "name": "claude", "baseUrl": "https://api.anthropic.com", "apiKey": "sk-x", "model": "m" },
+                        { "name": "ollama", "baseUrl": "http://127.0.0.1:11434/v1", "apiKey": "", "model": "translategemma:4b" }
+                    ]
+                }"#,
+            )
+            .expect("write");
+
+            let loaded = load_config_from(&path);
+
+            assert!(loaded.problem.is_none(), "this is a migration, not a failure");
+            assert_eq!(loaded.config.active_provider, "ollama");
+            assert!(
+                loaded
+                    .notices
+                    .iter()
+                    .any(|notice| notice.contains("claude") && notice.contains("ollama")),
+                "the change has to be visible: {:?}",
+                loaded.notices
+            );
+            assert!(
+                validate_active_provider(&loaded.config).is_ok(),
+                "and the result must actually work"
             );
         }
 
@@ -1436,13 +1515,13 @@ mod tests {
                     "selectionTriggerEnabled": true,
                     "sourceLang": "auto",
                     "targetLang": "ja",
-                    "activeProvider": "claude",
+                    "activeProvider": "openai",
                     "mouseTriggerButton": 2,
                     "providers": [{
-                        "name": "claude",
-                        "baseUrl": "https://api.anthropic.com",
+                        "name": "openai",
+                        "baseUrl": "https://api.openai.com/v1",
                         "apiKey": "sk-current",
-                        "model": "claude-haiku-4-5",
+                        "model": "gpt-4o-mini",
                         "systemPrompt": "sys",
                         "userPrompt": "{text}",
                         "extraParams": {}
@@ -1456,7 +1535,7 @@ mod tests {
             assert!(loaded.problem.is_none());
             assert_eq!(loaded.config.providers[0].api_key, "sk-current");
             assert_eq!(loaded.config.target_lang, "ja");
-            assert_eq!(loaded.config.active_provider, "claude");
+            assert_eq!(loaded.config.active_provider, "openai");
         }
 
         #[test]
@@ -1628,12 +1707,12 @@ mod tests {
         fn a_known_provider_is_accepted() {
             let mut config = base();
             ConfigPatch {
-                active_provider: Some("claude".to_string()),
+                active_provider: Some("ollama".to_string()),
                 ..ConfigPatch::default()
             }
             .apply_to(&mut config)
             .expect("apply");
-            assert_eq!(config.active_provider, "claude");
+            assert_eq!(config.active_provider, "ollama");
         }
 
         /// The whole point of the typed patch: a key that is not a field is an

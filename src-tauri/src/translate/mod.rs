@@ -1,6 +1,3 @@
-pub mod claude;
-pub mod deeplx;
-pub mod gemini;
 pub mod http;
 pub mod language;
 pub mod openai_compat;
@@ -73,21 +70,6 @@ pub fn build_provider(cfg: &ProviderConfig) -> Result<Arc<dyn TranslateProvider>
             &cfg.user_prompt,
             cfg.extra_params.clone(),
         ))),
-        "gemini" => Ok(Arc::new(gemini::GeminiProvider::new(
-            &cfg.base_url,
-            &cfg.api_key,
-            &cfg.model,
-            &cfg.system_prompt,
-            &cfg.user_prompt,
-        ))),
-        "claude" => Ok(Arc::new(claude::ClaudeProvider::new(
-            &cfg.base_url,
-            &cfg.api_key,
-            &cfg.model,
-            &cfg.system_prompt,
-            &cfg.user_prompt,
-        ))),
-        "deeplx" => Ok(Arc::new(deeplx::DeepLXProvider::new(&cfg.base_url))),
         other => Err(TranslateError::Config(format!(
             "Unknown provider '{other}'. Supported providers are: {}",
             SUPPORTED_PROVIDERS.join(", ")
@@ -96,7 +78,7 @@ pub fn build_provider(cfg: &ProviderConfig) -> Result<Arc<dyn TranslateProvider>
 }
 
 /// The names [`build_provider`] accepts. Used for error messages and migration.
-pub const SUPPORTED_PROVIDERS: &[&str] = &["openai", "ollama", "gemini", "claude", "deeplx"];
+pub const SUPPORTED_PROVIDERS: &[&str] = &["openai", "ollama"];
 
 pub struct TranslationEngine {
     providers: HashMap<String, ProviderEntry>,

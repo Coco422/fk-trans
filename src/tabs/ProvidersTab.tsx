@@ -9,12 +9,6 @@ import Field, { TextArea, TextInput } from "../ui/Field";
 import ActionsCard from "./ActionsCard";
 import { providerLabel } from "./labels";
 
-/**
- * Providers with prompts and an OpenAI-shaped request body. DeepLX takes a bare
- * `{text, source, target}` and has nothing to configure beyond its address.
- */
-const LLM_PROVIDERS = new Set(["openai", "gemini", "claude", "ollama"]);
-
 type Phase =
   | "idle"
   | "dirty"
@@ -176,8 +170,6 @@ function useEditor(provider: () => ProviderConfig) {
     busy: () => status().phase === "saving" || status().phase === "testing",
     save,
     test,
-    needsKey: () => provider().name !== "deeplx",
-    hasPrompts: () => LLM_PROVIDERS.has(provider().name),
   };
 }
 
@@ -242,15 +234,16 @@ export default function ProvidersTab() {
                   </div>
 
                   <div class="space-y-2">
-                    <Show when={editor.needsKey()}>
-                      <TextInput
-                        type="password"
-                        value={editor.current().apiKey}
-                        placeholder="API Key"
-                        mono
-                        onInput={(value) => editor.edit("apiKey", value)}
-                      />
-                    </Show>
+                    {/* Optional for a local endpoint: a key is only demanded
+                        where one could be used, which is decided from the URL
+                        rather than from the provider's name. */}
+                    <TextInput
+                      type="password"
+                      value={editor.current().apiKey}
+                      placeholder="API Key（本地服务可以留空）"
+                      mono
+                      onInput={(value) => editor.edit("apiKey", value)}
+                    />
 
                     <div class="flex gap-2">
                       <div class="min-w-0 flex-1">
@@ -261,61 +254,57 @@ export default function ProvidersTab() {
                           onInput={(value) => editor.edit("baseUrl", value)}
                         />
                       </div>
-                      <Show when={editor.needsKey()}>
-                        <div class="w-44 shrink-0">
-                          <TextInput
-                            value={editor.current().model}
-                            placeholder="Model"
-                            mono
-                            onInput={(value) => editor.edit("model", value)}
-                          />
-                        </div>
-                      </Show>
+                      <div class="w-44 shrink-0">
+                        <TextInput
+                          value={editor.current().model}
+                          placeholder="Model"
+                          mono
+                          onInput={(value) => editor.edit("model", value)}
+                        />
+                      </div>
                     </div>
                   </div>
 
-                  <Show when={editor.hasPrompts()}>
-                    <button
-                      type="button"
-                      class="mt-3 cursor-pointer text-xs text-faint hover:text-muted"
-                      onClick={() => editor.toggleExpanded()}
-                    >
-                      {editor.expanded() ? "▾ 收起高级设置" : "▸ 高级设置"}
-                    </button>
+                  <button
+                    type="button"
+                    class="mt-3 cursor-pointer text-xs text-faint hover:text-muted"
+                    onClick={() => editor.toggleExpanded()}
+                  >
+                    {editor.expanded() ? "▾ 收起高级设置" : "▸ 高级设置"}
+                  </button>
 
-                    <Show when={editor.expanded()}>
-                      <div class="mt-3 space-y-3 border-t border-line pt-3">
-                        <Field label="System Prompt" hint="留空则用默认提示词。" stacked>
-                          <TextArea
-                            value={editor.current().systemPrompt}
-                            rows={3}
-                            onInput={(value) => editor.edit("systemPrompt", value)}
-                          />
-                        </Field>
-                        <Field
-                          label="User Prompt"
-                          hint="可用占位符：{from}、{to}、{text}。"
-                          stacked
-                        >
-                          <TextArea
-                            value={editor.current().userPrompt}
-                            rows={3}
-                            onInput={(value) => editor.edit("userPrompt", value)}
-                          />
-                        </Field>
-                        <Field
-                          label="附加参数"
-                          hint="发给服务商的额外字段，JSON。例如 Ollama 的 reasoning_effort。"
-                          stacked
-                        >
-                          <TextArea
-                            value={editor.extraParamsValue()}
-                            rows={4}
-                            onInput={(value) => editor.editExtraParams(value)}
-                          />
-                        </Field>
-                      </div>
-                    </Show>
+                  <Show when={editor.expanded()}>
+                    <div class="mt-3 space-y-3 border-t border-line pt-3">
+                      <Field label="System Prompt" hint="留空则用默认提示词。" stacked>
+                        <TextArea
+                          value={editor.current().systemPrompt}
+                          rows={3}
+                          onInput={(value) => editor.edit("systemPrompt", value)}
+                        />
+                      </Field>
+                      <Field
+                        label="User Prompt"
+                        hint="可用占位符：{from}、{to}、{text}。"
+                        stacked
+                      >
+                        <TextArea
+                          value={editor.current().userPrompt}
+                          rows={3}
+                          onInput={(value) => editor.edit("userPrompt", value)}
+                        />
+                      </Field>
+                      <Field
+                        label="附加参数"
+                        hint="发给服务商的额外字段，JSON。例如 Ollama 的 reasoning_effort。"
+                        stacked
+                      >
+                        <TextArea
+                          value={editor.extraParamsValue()}
+                          rows={4}
+                          onInput={(value) => editor.editExtraParams(value)}
+                        />
+                      </Field>
+                    </div>
                   </Show>
 
                   <Show when={editor.status().message}>

@@ -44,7 +44,7 @@ CGEventTap 的回调跑在一个 macOS 嫌慢就会掐断的线程上，而且�
 | `capture/` | 取到选中的文字和它在屏幕上的位置 | 不决定要不要翻译 |
 | `macos/ax.rs` | 辅助功能接口的裸调用，把 `AXError` 分类 | 不决定回退 |
 | `macos/panel.rs` | 把 Tauri 窗口变成一个真正的 `NSPanel` | 不知道浮层该在哪 |
-| `translate/` | 四家服务共用一个 HTTP 层，各自只写请求和解析 | 不认识鼠标 |
+| `translate/` | 翻译服务共用一个 HTTP 层；翻译走 `translate`，AI 动作走 `complete` | 不认识鼠标 |
 | `lib.rs` | 把上面这些按顺序接起来，管住并发闸门 | 不含业务规则 |
 
 ## 一次翻译的路径

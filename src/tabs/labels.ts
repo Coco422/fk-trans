@@ -47,10 +47,7 @@ export function languageLabel(code: string): string {
  * appear here, even before anyone has written a label for it.
  */
 const PROVIDERS: Record<string, string> = {
-  deeplx: "DeepLX（本地）",
   openai: "OpenAI 兼容",
-  gemini: "Google Gemini",
-  claude: "Anthropic Claude",
   ollama: "Ollama（本地）",
 };
 

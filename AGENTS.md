@@ -67,10 +67,12 @@ in sync, so prefer AppKit-native behaviour over portable-looking indirection.
   is the only place a language code becomes a name or a BCP-47 code. Prompts ask
   for the form they need (`{to}`, `{to_name}`, `{to_code}`) instead of each
   provider mapping codes itself.
-- Providers are `openai` (any OpenAI-compatible endpoint, including Ollama),
-  `claude`, `gemini`, `deeplx`. Ollama is a *preset* of `openai`, not an
-  implementation: its `/v1/chat/completions` is compatible, and `reasoning_effort`
-  controls thinking. See `docs/local-models.md`.
+- Providers are `openai` (any OpenAI-compatible endpoint) and `ollama`. Ollama is
+  a *preset* of `openai`, not an implementation: it is reached over
+  `/v1/chat/completions`, and `reasoning_effort` controls thinking. See
+  `docs/local-models.md`. `claude`, `gemini` and `deeplx` were removed; a config
+  that names them loses the entry and, if it was the active one, is repointed —
+  both reported through `ConfigLoad::notices`, never done quietly.
 - An unknown provider name is an error. It used to fall through to
   `api.openai.com`, silently sending the user's text to a service they had not
   configured.

@@ -109,7 +109,7 @@ mod tests {
         let parsed: Sample = from_str_compat(
             r#"{
                 "sourceLang": "ja",
-                "activeProvider": "claude",
+                "activeProvider": "ollama",
                 "items": [{ "baseUrl": "https://c.test", "apiKey": "sk-c" }]
             }"#,
         )
