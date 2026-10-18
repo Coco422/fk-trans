@@ -34,6 +34,9 @@ pub struct DiagnosticsSnapshot {
     pub log_max_file_size_bytes: u64,
     pub log_rotation_keep_files: usize,
     pub accessibility_trusted: bool,
+    /// False means the popup is a plain window and clicking the trigger point
+    /// will activate the app — which usually destroys the selection being read.
+    pub trigger_panel_active: bool,
     pub mouse: MouseTriggerState,
     pub active_provider_ready: bool,
     pub active_provider_reason: Option<String>,
@@ -322,6 +325,7 @@ fn current_snapshot(app: &AppHandle, state: &AppState) -> DiagnosticsSnapshot {
         log_max_file_size_bytes: crate::LOG_MAX_FILE_SIZE_BYTES,
         log_rotation_keep_files: crate::LOG_ROTATION_KEEP_FILES,
         accessibility_trusted: mouse.accessibility_trusted,
+        trigger_panel_active: state.trigger_panel_active,
         mouse,
         active_provider_ready: active_readiness.is_ok(),
         active_provider_reason: active_readiness.err(),

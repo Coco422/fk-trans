@@ -37,6 +37,23 @@ export default function DiagnosticsTab() {
             <Show when={!diag().accessibilityTrusted}>
               <p class="text-xs text-warn">授权后需要重启 fk-trans 才会生效。</p>
             </Show>
+
+            <div class="flex items-center justify-between border-t border-line pt-3">
+              <div>
+                <div class="text-sm text-ink">触发点窗口</div>
+                <div class="mt-0.5 text-xs text-faint">
+                  小圆点和浮层用的是一个不抢焦点的面板窗口。
+                </div>
+              </div>
+              <Badge tone={diag().triggerPanelActive ? "ok" : "warn"}>
+                {diag().triggerPanelActive ? "正常" : "降级为普通窗口"}
+              </Badge>
+            </div>
+            <Show when={!diag().triggerPanelActive}>
+              <p class="text-xs text-warn">
+                面板窗口创建失败，点击小圆点会抢走焦点，正在读取的那个应用往往会丢掉选区。
+              </p>
+            </Show>
           </Section>
 
           <Section title="触发状态">

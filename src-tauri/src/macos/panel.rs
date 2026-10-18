@@ -40,6 +40,20 @@ impl TriggerPanelWindow {
     pub fn adopt(app: &AppHandle) -> Option<Self> {
         let window = app.get_webview_window(WINDOW_LABEL)?;
 
+        // `to_panel` reaches for state that `tauri_nspanel::init()` manages, and
+        // panics through `AppHandle::state` when the plugin was not registered.
+        // That panic cannot unwind out of Tauri's setup hook, so it aborts the
+        // process — which is exactly what happened the first time this ran.
+        if app
+            .try_state::<tauri_nspanel::WebviewPanelManager<tauri::Wry>>()
+            .is_none()
+        {
+            log::error!(
+                "[panel] tauri_nspanel::init() was not registered; running with a plain window"
+            );
+            return None;
+        }
+
         let panel = match window.to_panel::<TriggerPanel>() {
             Ok(panel) => panel,
             Err(error) => {
@@ -49,6 +63,7 @@ impl TriggerPanelWindow {
         };
 
         configure(&panel);
+        log::info!("[panel] The popup window is an NSPanel");
 
         Some(Self {
             app: app.clone(),

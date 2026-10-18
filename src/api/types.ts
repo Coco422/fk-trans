@@ -39,7 +39,12 @@ export type DiagnosticsSnapshot = { appVersion: string, logDir: string | null, d
 /**
  * A file size, so well within the range a JSON number represents exactly.
  */
-logMaxFileSizeBytes: number, logRotationKeepFiles: number, accessibilityTrusted: boolean, mouse: MouseTriggerState, activeProviderReady: boolean, activeProviderReason: string | null, providers: Array<ProviderDiagnostic>, 
+logMaxFileSizeBytes: number, logRotationKeepFiles: number, accessibilityTrusted: boolean, 
+/**
+ * False means the popup is a plain window and clicking the trigger point
+ * will activate the app — which usually destroys the selection being read.
+ */
+triggerPanelActive: boolean, mouse: MouseTriggerState, activeProviderReady: boolean, activeProviderReason: string | null, providers: Array<ProviderDiagnostic>, 
 /**
  * Set when the config file could not be read at startup, so the settings UI
  * can explain why everything looks like a fresh install.

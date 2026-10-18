@@ -70,6 +70,10 @@ pub struct AppState {
     /// when that failed, in which case the popup still works but behaves like an
     /// ordinary window: it activates the app when clicked.
     pub panel_window: Mutex<Option<macos::panel::TriggerPanelWindow>>,
+    /// Whether the popup became a panel at startup. Reported in Diagnostics
+    /// because the fallback is silent and its symptom — the trigger point
+    /// taking focus away from the app being read — looks like a different bug.
+    pub trigger_panel_active: bool,
 }
 
 /// Releases the pipeline gate when the run ends, however it ends.
@@ -622,6 +626,9 @@ pub fn run() {
         )
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Must be registered before `macos::panel` converts anything: `to_panel`
+        // reaches for state this plugin's own setup manages.
+        .plugin(tauri_nspanel::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // LaunchAgent rather than an AppleScript login item: it survives a
@@ -691,6 +698,7 @@ pub fn run() {
                 config_load_problem,
                 config_notices,
                 trigger_panel: Mutex::new(trigger::panel::Panel::new()),
+                trigger_panel_active: panel_window.is_some(),
                 panel_window: Mutex::new(panel_window),
             });
 
