@@ -1,6 +1,5 @@
 use crate::config;
-#[cfg(target_os = "macos")]
-use crate::platform;
+use crate::macos;
 use crate::AppState;
 use tauri::{
     menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
@@ -16,11 +15,11 @@ pub fn create_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .enabled;
 
-    let enable_item = CheckMenuItemBuilder::with_id("enable", "Enable fk-trans")
+    let enable_item = CheckMenuItemBuilder::with_id("enable", "启用 fk-trans")
         .checked(is_enabled)
         .build(app)?;
-    let settings_item = MenuItemBuilder::with_id("settings", "Settings...").build(app)?;
-    let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+    let settings_item = MenuItemBuilder::with_id("settings", "设置…").build(app)?;
+    let quit_item = MenuItemBuilder::with_id("quit", "退出 fk-trans").build(app)?;
 
     let menu = MenuBuilder::new(app)
         .item(&enable_item)
@@ -102,8 +101,7 @@ fn reveal_window(window: &tauri::WebviewWindow) {
     let _ = window.set_always_on_top(true);
     let _ = window.show();
 
-    #[cfg(target_os = "macos")]
-    platform::macos::focus_window(window);
+    macos::window::focus_window(window);
 
     let _ = window.set_focus();
 

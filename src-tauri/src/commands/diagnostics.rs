@@ -1,15 +1,17 @@
-use crate::config::{self, AppConfig};
+use crate::config::{self, AppConfig, ConfigLoadProblem};
 use crate::mouse::listener::{self, MouseTriggerState};
-use crate::ocr::OcrDiagnostic;
 use crate::AppState;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 const MAX_LOG_LINES: usize = 240;
 const MAX_FRONTEND_LOG_CHARS: usize = 2000;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct ProviderDiagnostic {
     pub name: String,
     pub active: bool,
@@ -20,41 +22,45 @@ pub struct ProviderDiagnostic {
     pub model_configured: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct DiagnosticsSnapshot {
     pub app_version: String,
     pub log_dir: Option<String>,
     pub debug_logging: bool,
+    /// A file size, so well within the range a JSON number represents exactly.
+    #[ts(type = "number")]
     pub log_max_file_size_bytes: u64,
     pub log_rotation_keep_files: usize,
     pub accessibility_trusted: bool,
-    pub permissions: PermissionDiagnostic,
+    /// The binary macOS grants permissions to. Shown because a dev run and the
+    /// installed app are different identities to macOS.
+    pub executable_path: Option<String>,
+    /// False for `npm run tauri dev`, whose permissions are separate from the
+    /// installed app's.
+    pub running_bundled: bool,
+    /// False means the popup is a plain window and clicking the trigger point
+    /// will activate the app — which usually destroys the selection being read.
+    pub trigger_panel_active: bool,
     pub mouse: MouseTriggerState,
-    pub ocr: OcrDiagnostic,
     pub active_provider_ready: bool,
     pub active_provider_reason: Option<String>,
     pub providers: Vec<ProviderDiagnostic>,
+    /// Set when the config file could not be read at startup, so the settings UI
+    /// can explain why everything looks like a fresh install.
+    pub config_load_problem: Option<ConfigLoadProblem>,
+    /// Changes made while loading the config, e.g. a provider entry that is no
+    /// longer supported. Shown so a migration is not mistaken for the app
+    /// rewriting the user's settings on its own.
+    pub config_notices: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct ExportedDiagnostics {
     pub path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PermissionDiagnostic {
-    pub accessibility_trusted: bool,
-    pub screen_recording_trusted: bool,
-    pub current_executable_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MacosDevPermissionTarget {
-    pub executable_path: String,
-    pub bundle_identifier: Option<String>,
-    pub code_identifier: Option<String>,
 }
 
 fn provider_diagnostics(config: &AppConfig) -> Vec<ProviderDiagnostic> {
@@ -83,9 +89,6 @@ fn app_log_dir(app: &AppHandle) -> Option<PathBuf> {
 fn sanitize_line(line: &str) -> String {
     if line.contains("[clipboard] Captured:") {
         return "[clipboard] Captured: [redacted]".to_string();
-    }
-    if line.contains("[ocr] Recognized") {
-        return "[ocr] Recognized: [redacted]".to_string();
     }
     if line.contains("Translation error:") {
         return "[pipeline] Translation error: [redacted]".to_string();
@@ -155,6 +158,26 @@ fn read_recent_logs(log_dir: &Path, config: &AppConfig) -> Vec<String> {
     }
 }
 
+/// A config that failed to load is invisible from the outside: the app just
+/// looks like it forgot everything. Spell it out, including where the original
+/// was kept.
+fn describe_config_problem(problem: Option<&ConfigLoadProblem>) -> String {
+    let Some(problem) = problem else {
+        return "none".to_string();
+    };
+    let kind = match problem.kind {
+        config::ConfigLoadProblemKind::Unreadable => "could not be read",
+        config::ConfigLoadProblemKind::Malformed => "is not valid config",
+    };
+    match &problem.backup_path {
+        Some(backup) => format!(
+            "{} {}: {} (original kept at {})",
+            problem.path, kind, problem.detail, backup
+        ),
+        None => format!("{} {}: {}", problem.path, kind, problem.detail),
+    }
+}
+
 fn build_report(app: &AppHandle, snapshot: &DiagnosticsSnapshot, config: &AppConfig) -> String {
     let log_lines = app_log_dir(app)
         .as_deref()
@@ -179,6 +202,22 @@ fn build_report(app: &AppHandle, snapshot: &DiagnosticsSnapshot, config: &AppCon
         .collect::<Vec<_>>()
         .join("\n");
 
+    // A wedged run is invisible from the outside: the app just stops reacting to
+    // triggers. Report the gate so the failure layer is identifiable from a bug
+    // report rather than inferred from "middle-click does nothing".
+    let gate_held_for_ms = app.try_state::<AppState>().and_then(|state| {
+        state
+            .pipeline_gate
+            .held_for_ms(crate::mouse::listener::now_millis())
+    });
+    let gate_note = match gate_held_for_ms {
+        None => "idle",
+        Some(held) if held >= crate::pipeline::DEFAULT_GATE_LIMIT.as_millis() as i64 => {
+            "WEDGED: held past its limit; the next trigger will reclaim the gate"
+        }
+        Some(_) => "a translation is currently running",
+    };
+
     let report = format!(
         r#"fk-trans diagnostics
 generated_at: {}
@@ -187,11 +226,6 @@ log_dir: {}
 debug_logging: {}
 log_max_file_size_bytes: {}
 log_rotation_keep_files: {}
-
-permissions:
-  accessibility_trusted: {}
-  screen_recording_trusted: {}
-  current_executable_path: {}
 
 mouse_trigger:
   status: {:?}
@@ -207,20 +241,18 @@ mouse_trigger:
   last_error: {:?}
   test_active_until: {:?}
 
+pipeline_gate:
+  held_for_ms: {:?}
+  note: {}
+
+config_file:
+  problem: {}
+  notices: {}
+
 provider_readiness:
   active_provider_ready: {}
   active_provider_reason: {}
 {}
-
-ocr:
-  enabled: {}
-  backend: {}
-  ready: {}
-  reason: {}
-  screen_capture_ready: {}
-  last_result: {}
-  last_error: {}
-  last_elapsed_ms: {}
 
 recent_logs:
 {}
@@ -231,13 +263,6 @@ recent_logs:
         snapshot.debug_logging,
         snapshot.log_max_file_size_bytes,
         snapshot.log_rotation_keep_files,
-        snapshot.permissions.accessibility_trusted,
-        snapshot.permissions.screen_recording_trusted,
-        snapshot
-            .permissions
-            .current_executable_path
-            .as_deref()
-            .unwrap_or("unknown"),
         snapshot.mouse.status,
         snapshot.mouse.accessibility_trusted,
         snapshot.mouse.trigger_button,
@@ -250,21 +275,22 @@ recent_logs:
         snapshot.mouse.last_pipeline_result,
         snapshot.mouse.last_error,
         snapshot.mouse.test_active_until,
+        gate_held_for_ms,
+        gate_note,
+        describe_config_problem(snapshot.config_load_problem.as_ref()),
+        if snapshot.config_notices.is_empty() {
+            "none".to_string()
+        } else {
+            snapshot
+                .config_notices
+                .iter()
+                .map(|notice| format!("  - {notice}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
         snapshot.active_provider_ready,
         snapshot.active_provider_reason.as_deref().unwrap_or("none"),
         provider_lines,
-        snapshot.ocr.enabled,
-        snapshot.ocr.backend,
-        snapshot.ocr.ready,
-        snapshot.ocr.reason.as_deref().unwrap_or("none"),
-        snapshot.ocr.screen_capture_ready,
-        snapshot.ocr.last_result.as_deref().unwrap_or("none"),
-        snapshot.ocr.last_error.as_deref().unwrap_or("none"),
-        snapshot
-            .ocr
-            .last_elapsed_ms
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "none".to_string()),
         if log_lines.is_empty() {
             "(no log lines found)".to_string()
         } else {
@@ -283,9 +309,8 @@ fn current_snapshot(app: &AppHandle, state: &AppState) -> DiagnosticsSnapshot {
         .clone();
     let mut mouse = listener::snapshot(&state.mouse_trigger_state);
 
-    #[cfg(target_os = "macos")]
     {
-        mouse.accessibility_trusted = crate::platform::macos::check_accessibility_permissions();
+        mouse.accessibility_trusted = crate::macos::permission::is_granted();
         if !mouse.accessibility_trusted
             && !matches!(
                 mouse.status,
@@ -298,7 +323,6 @@ fn current_snapshot(app: &AppHandle, state: &AppState) -> DiagnosticsSnapshot {
     }
 
     let active_readiness = config::validate_active_provider(&config);
-    let permissions = current_permissions();
 
     DiagnosticsSnapshot {
         app_version: app.package_info().version.to_string(),
@@ -307,34 +331,17 @@ fn current_snapshot(app: &AppHandle, state: &AppState) -> DiagnosticsSnapshot {
         log_max_file_size_bytes: crate::LOG_MAX_FILE_SIZE_BYTES,
         log_rotation_keep_files: crate::LOG_ROTATION_KEEP_FILES,
         accessibility_trusted: mouse.accessibility_trusted,
-        permissions,
+        executable_path: crate::macos::permission::current_executable()
+            .map(|path| path.display().to_string()),
+        running_bundled: crate::macos::permission::current_executable()
+            .is_some_and(|path| crate::macos::permission::is_bundled(&path)),
+        trigger_panel_active: state.trigger_panel_active,
         mouse,
-        ocr: state.ocr_runtime.snapshot(config.ocr_enabled),
         active_provider_ready: active_readiness.is_ok(),
         active_provider_reason: active_readiness.err(),
         providers: provider_diagnostics(&config),
-    }
-}
-
-fn current_permissions() -> PermissionDiagnostic {
-    #[cfg(target_os = "macos")]
-    {
-        PermissionDiagnostic {
-            accessibility_trusted: crate::platform::macos::check_accessibility_permissions(),
-            screen_recording_trusted: crate::platform::macos::check_screen_recording_permissions(),
-            current_executable_path: crate::platform::macos::current_executable_path()
-                .map(|path| path.display().to_string()),
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        PermissionDiagnostic {
-            accessibility_trusted: false,
-            screen_recording_trusted: false,
-            current_executable_path: std::env::current_exe()
-                .ok()
-                .map(|path| path.display().to_string()),
-        }
+        config_load_problem: state.config_load_problem.clone(),
+        config_notices: state.config_notices.clone(),
     }
 }
 
@@ -393,47 +400,13 @@ pub fn reveal_diagnostics_folder(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn reveal_executable() -> Result<(), String> {
+    crate::macos::permission::reveal_executable()
+}
+
+#[tauri::command]
 pub fn open_accessibility_settings() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        crate::platform::macos::open_accessibility_settings()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err("Accessibility settings shortcut is only available on macOS".to_string())
-    }
-}
-
-#[tauri::command]
-pub fn get_macos_dev_permission_target() -> Result<MacosDevPermissionTarget, String> {
-    let path = std::env::current_exe()
-        .map_err(|e| format!("Unable to resolve current executable: {}", e))?;
-    let executable_path = path.display().to_string();
-
-    #[cfg(target_os = "macos")]
-    let code_identifier = crate::platform::macos::current_code_identifier(&path);
-    #[cfg(not(target_os = "macos"))]
-    let code_identifier = None;
-
-    Ok(MacosDevPermissionTarget {
-        executable_path,
-        bundle_identifier: None,
-        code_identifier,
-    })
-}
-
-#[tauri::command]
-pub fn reveal_current_executable() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        crate::platform::macos::reveal_current_executable()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let path = std::env::current_exe()
-            .map_err(|e| format!("Unable to resolve current executable: {}", e))?;
-        open_path(&path)
-    }
+    crate::macos::permission::open_settings()
 }
 
 #[tauri::command]
@@ -473,30 +446,11 @@ pub fn log_frontend_event(
 }
 
 fn open_path(path: &Path) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(path)
-            .spawn()
-            .map_err(|e| format!("Failed to open path: {}", e))?;
-        Ok(())
-    }
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .arg(path)
-            .spawn()
-            .map_err(|e| format!("Failed to open path: {}", e))?;
-        Ok(())
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()
-            .map_err(|e| format!("Failed to open path: {}", e))?;
-        Ok(())
-    }
+    std::process::Command::new("open")
+        .arg(path)
+        .spawn()
+        .map_err(|error| format!("Failed to open path: {error}"))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -528,12 +482,5 @@ provider error sk-secret-value
         assert!(!redacted.contains("sk-secret-value"));
         assert!(!redacted.contains("private selected text"));
         assert!(redacted.contains("[redacted-api-key]"));
-    }
-
-    #[test]
-    fn diagnostics_reports_current_executable_path() {
-        let permissions = current_permissions();
-
-        assert!(permissions.current_executable_path.is_some());
     }
 }

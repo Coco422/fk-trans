@@ -1,6 +1,6 @@
 {
   "name": "fk-trans",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "",
   "type": "module",
   "scripts": {
@@ -8,22 +8,24 @@
     "dev": "vite",
     "build": "vite build",
     "serve": "vite preview",
-    "test:tauri-args": "node scripts/check-tauri-command-args.mjs",
+    "gen:types": "cd src-tauri && TS_RS_EXPORT_DIR=../src/api cargo test --offline --lib -- export_bindings",
+    "typecheck": "tsc --noEmit",
+    "check": "biome check src && npm run typecheck && npm run build -- --mode development",
     "tauri": "tauri",
-    "release:mac": "scripts/release-mac.sh"
+    "release:mac": "scripts/release-mac.sh",
+    "lint": "biome check src",
+    "lint:fix": "biome check --write src"
   },
   "license": "MIT",
   "dependencies": {
-    "@solidjs/router": "^0.16.1",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-autostart": "2.7.0",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "solid-js": "^1.9.3"
   },
   "devDependencies": {
-    "@emnapi/core": "^1.10.0",
-    "@emnapi/runtime": "^1.10.0",
+    "@biomejs/biome": "2.5.15",
     "@tailwindcss/vite": "^4.3.0",
     "@tauri-apps/cli": "^2",
     "tailwindcss": "^4.3.0",

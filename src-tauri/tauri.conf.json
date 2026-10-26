@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "fk-trans",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "com.ray.fk-trans",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -29,16 +29,6 @@
         "width": 400,
         "height": 300,
         "url": "/popup"
-      },
-      {
-        "label": "ocr-select",
-        "visible": false,
-        "decorations": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "width": 800,
-        "height": 600,
-        "url": "/ocr-select"
       }
     ],
     "security": {

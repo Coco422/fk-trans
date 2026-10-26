@@ -1,10 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
 pub struct HistoryEntry {
     pub id: String,
+    #[ts(type = "number")]
     pub timestamp: i64,
     pub original: String,
     pub translated: String,
@@ -24,7 +28,10 @@ fn history_path() -> PathBuf {
 fn load_history_from_disk() -> Vec<HistoryEntry> {
     let path = history_path();
     match std::fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        // `from_str_compat` keeps history.json files written by earlier builds
+        // readable; silently emptying everyone's history on upgrade is careless
+        // even though it is not data loss.
+        Ok(json) => crate::compat::from_str_compat(&json).unwrap_or_default(),
         Err(_) => Vec::new(),
     }
 }

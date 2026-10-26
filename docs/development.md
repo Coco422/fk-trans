@@ -1,50 +1,30 @@
-# Development
+# 开发
 
-fk-trans is a Tauri v2 desktop translator with three local trigger paths:
-
-- Middle-click translation.
-- Deliberate left-button text selection translation, controlled by the Selection Trigger setting.
-- macOS OCR region translation with `Cmd+Shift+O`, using Screen Recording plus Apple Vision.
-
-## Local Run
-
-```sh
+```bash
 npm install
 npm run tauri dev
 ```
 
-Useful checks before hand testing:
+检查：
 
-```sh
-npm run test:tauri-args
-npm run build -- --mode development
+```bash
+npm run check
 cd src-tauri && cargo check --offline && cargo test --offline
 ```
 
-## macOS Dev Permissions
+## 开发版的辅助功能权限
 
-`npm run tauri dev` runs the bare debug executable:
+`npm run tauri dev` 直接运行 `src-tauri/target/debug/fk-trans`。macOS 按可执行文件授权，
+所以它和安装好的 `fk-trans.app` 是**两个应用**：给其中一个授权，另一个照样没有权限，
+系统设置里的开关看着是开的，应用却仍然报「未授权」。
 
-```text
-src-tauri/target/debug/fk-trans
+「设置 → 诊断」里会显示当前运行的是哪个可执行文件，并能在 Finder 中定位它。
+系统设置的列表里没有它时，点「+」，按 ⌘⇧G 粘贴路径添加。
+
+改完权限要完全重启开发版：
+
+```bash
+pkill -f 'target/debug/fk-trans'; pkill -f 'tauri dev'; pkill -f vite
 ```
 
-macOS TCC treats that executable separately from a release `.app`, so granting a bundled app does not grant the dev binary.
-
-For text capture, grant Accessibility to the current dev executable. For OCR screenshot capture, grant Screen & System Audio Recording to the current dev executable. In Settings > Diagnostics, use the macOS Dev Permissions card to reveal the exact executable path.
-
-If the System Settings picker does not show `fk-trans`, click `+`, press `Cmd+Shift+G`, paste the executable path, then add it.
-
-When launching `npm run tauri dev` from another app, macOS may attribute Screen Recording responsibility to the host process too. For example, a dev run launched from Codex Desktop may require Screen Recording for both `Codex` and `fk-trans`; a run launched from Terminal or iTerm may require the terminal app as well.
-
-After changing Accessibility or Screen Recording permissions, fully stop and restart the dev run:
-
-```sh
-pkill -f 'target/debug/fk-trans'
-pkill -f 'tauri dev'
-pkill -f 'vite'
-npm run tauri dev
-```
-
-If duplicate `fk-trans` entries appear in Privacy & Security, remove stale entries, rebuild once, then re-add the current `src-tauri/target/debug/fk-trans` executable.
-
+列表里出现重复的 fk-trans 时，删掉旧的，重新构建一次再添加当前的可执行文件。

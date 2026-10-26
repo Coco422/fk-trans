@@ -1,40 +1,52 @@
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
+
+// The app is macOS-only by decision, not by omission: the trigger layer is built
+// on CGEventTap and the Accessibility API, and the popup relies on AppKit window
+// behaviour. A build for another platform would be a different program, so say so
+// here rather than compiling a half-working one out of `#[cfg]` forks nobody ever
+// runs.
+#[cfg(not(target_os = "macos"))]
+compile_error!("fk-trans targets macOS only; see README.md");
+
+mod capture;
 mod clipboard;
 mod commands;
+mod compat;
 mod config;
 mod history;
+mod macos;
 mod mouse;
-mod ocr;
-mod platform;
+mod pipeline;
 mod translate;
 mod tray;
+mod trigger;
 
 use config::AppConfig;
 use history::HistoryStore;
-use mouse::listener::{MouseTriggerEvent, TriggerSource};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
-use tauri::{Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize};
+use macos::ax::ScreenRect;
+use mouse::listener::MouseTriggerEvent;
+use std::sync::{Arc, Mutex};
+use tauri::{Emitter, Manager, PhysicalPosition};
 use tokio::sync::RwLock;
-use tokio::time::{sleep, timeout, Duration};
-use translate::provider::TranslateError;
 use translate::TranslationEngine;
+use trigger::placement::Point;
+use trigger::TriggerSource;
 
-const POPUP_CURSOR_OFFSET_X: f64 = 14.0;
-const POPUP_CURSOR_OFFSET_Y: f64 = 16.0;
-const POPUP_SCREEN_MARGIN: f64 = 8.0;
-const POPUP_TRANSLATION_WIDTH: f64 = 460.0;
-const POPUP_TRANSLATION_HEIGHT: f64 = 520.0;
-const POPUP_OCR_WIDTH: f64 = 560.0;
-const POPUP_OCR_HEIGHT: f64 = 680.0;
 const LOG_MAX_FILE_SIZE_BYTES: u64 = 512 * 1024;
 const LOG_ROTATION_KEEP_FILES: usize = 4;
-const CLIPBOARD_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
-const KEYBOARD_SHORTCUT_CAPTURE_DELAY: Duration = Duration::from_millis(160);
-const SELECTION_CAPTURE_SETTLE_DELAY: Duration = Duration::from_millis(120);
-const MACOS_ACCESSIBILITY_PERMISSION_MESSAGE: &str = "Accessibility permission is required to copy selected text. Add the current dev executable in System Settings > Privacy & Security > Accessibility, then restart npm run tauri dev.";
-const MACOS_SCREEN_RECORDING_PERMISSION_MESSAGE: &str = "Screen Recording permission is required for OCR. Add the current dev executable in System Settings > Privacy & Security > Screen Recording, then restart npm run tauri dev.";
+
+/// Payload of the `translation-ready` event.
+///
+/// A real struct rather than a `serde_json::json!` literal, so the generated
+/// TypeScript and the Rust side cannot drift. The cursor position used to be
+/// part of this and was never read — Rust positions the window itself.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "types.ts")]
+pub struct TranslationReadyPayload {
+    pub original: String,
+    pub result: translate::provider::TranslateResult,
+}
 
 pub struct AppState {
     pub config: Mutex<AppConfig>,
@@ -42,38 +54,89 @@ pub struct AppState {
     pub history: HistoryStore,
     pub mouse_listener: Mutex<Option<mouse::listener::MouseListener>>,
     pub mouse_trigger_state: mouse::listener::SharedMouseTriggerState,
-    pub ocr_runtime: ocr::OcrRuntime,
-    pub pipeline_running: Arc<AtomicBool>,
+    /// Lives in shared state so diagnostics can report a wedged run instead of
+    /// leaving the user with an app that silently ignores every trigger.
+    pub pipeline_gate: Arc<pipeline::PipelineGate>,
+    /// Set when the config file could not be read at startup. Without this the
+    /// app looks like it simply forgot the user's settings.
+    pub config_load_problem: Option<config::ConfigLoadProblem>,
+    /// Changes made while loading the config, e.g. a provider entry that no
+    /// longer exists. Reported in Diagnostics so a migration is not mistaken for
+    /// the app rewriting settings on its own.
+    pub config_notices: Vec<String>,
+    /// The trigger point and the card it opens into.
+    pub trigger_panel: Mutex<trigger::panel::Panel>,
+    /// The popup window, once macOS has been asked to make it a panel. `None`
+    /// when that failed, in which case the popup still works but behaves like an
+    /// ordinary window: it activates the app when clicked.
+    pub panel_window: Mutex<Option<macos::panel::TriggerPanelWindow>>,
+    /// Shared so the trigger point can fall back to a clipboard capture when it
+    /// is clicked, which is the only way to read a selection in an app that will
+    /// not describe one.
+    pub clipboard: Arc<clipboard::manager::ClipboardManager>,
+    /// Whether the popup became a panel at startup. Reported in Diagnostics
+    /// because the fallback is silent and its symptom — the trigger point
+    /// taking focus away from the app being read — looks like a different bug.
+    pub trigger_panel_active: bool,
 }
 
-pub(crate) struct PipelineGuard {
-    pub(crate) running: Arc<AtomicBool>,
+/// Releases the pipeline gate when the run ends, however it ends.
+struct GateGuard {
+    gate: Arc<pipeline::PipelineGate>,
+    token: pipeline::GateToken,
 }
 
-impl Drop for PipelineGuard {
+impl Drop for GateGuard {
     fn drop(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
+        self.gate.release(self.token);
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum CaptureMetadata {
-    Clipboard,
-    Ocr {
-        backend: &'static str,
-        elapsed_ms: u64,
-    },
-}
+/// Claim the pipeline gate, reporting the outcome to diagnostics.
+///
+/// Returns `None` when a live run already holds the gate. A *reclaimed* gate is
+/// logged as a warning and surfaced in diagnostics, because it means a previous
+/// run wedged — the app recovered, but something upstream is broken and the user
+/// needs to be able to see that rather than just noticing odd behaviour.
+pub(crate) fn acquire_pipeline_gate(
+    app: &tauri::AppHandle,
+    gate: &Arc<pipeline::PipelineGate>,
+) -> Option<GateGuard> {
+    let now_ms = mouse::listener::now_millis();
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct PopupLogicalSize {
-    width: f64,
-    height: f64,
-}
-
-impl PopupLogicalSize {
-    const fn new(width: f64, height: f64) -> Self {
-        Self { width, height }
+    match gate.try_acquire(now_ms) {
+        pipeline::GateOutcome::Acquired(token) => Some(GateGuard {
+            gate: gate.clone(),
+            token,
+        }),
+        pipeline::GateOutcome::Reclaimed { token, held_for_ms } => {
+            let note = format!(
+                "已恢复：上一次翻译卡住了 {} 秒，已放弃",
+                held_for_ms / 1000
+            );
+            log::warn!("[pipeline] {}", note);
+            if let Some(state) = app.try_state::<AppState>() {
+                mouse::listener::mark_pipeline_result(&state.mouse_trigger_state, &note, None);
+            }
+            Some(GateGuard {
+                gate: gate.clone(),
+                token,
+            })
+        }
+        pipeline::GateOutcome::Busy { held_for_ms } => {
+            log::info!(
+                "[pipeline] Previous pipeline still running ({}s), skipping trigger",
+                held_for_ms / 1000
+            );
+            if let Some(state) = app.try_state::<AppState>() {
+                mouse::listener::mark_pipeline_result(
+                    &state.mouse_trigger_state,
+                    "已跳过：上一次翻译还在进行",
+                    None,
+                );
+            }
+            None
+        }
     }
 }
 
@@ -92,136 +155,191 @@ fn current_cursor_position(app: &tauri::AppHandle) -> PhysicalPosition<f64> {
     }
 }
 
-fn clamp_popup_logical_size(
-    target: PopupLogicalSize,
-    work_area: PhysicalSize<u32>,
-    scale_factor: f64,
-) -> PopupLogicalSize {
-    let scale_factor = scale_factor.max(1.0);
-    let available_width =
-        ((work_area.width as f64) - (POPUP_SCREEN_MARGIN * 2.0)).max(1.0) / scale_factor;
-    let available_height =
-        ((work_area.height as f64) - (POPUP_SCREEN_MARGIN * 2.0)).max(1.0) / scale_factor;
+/// Where the pointer is, in the logical points the panel is placed in, and the
+/// usable area of the display it is on.
+///
+/// Resolved together because each needs the other: the pointer arrives in
+/// physical pixels, and turning those into points needs the scale factor of the
+/// display the pointer is on.
+///
+/// This goes through AppKit rather than Tauri's `monitor_from_point`, which
+/// compares against a rectangle in points while documenting its argument as
+/// physical pixels — so on a Retina display it never finds anything, and the
+/// trigger point was never placed at all. See `macos::screen`.
+fn pointer_and_display(cursor: PhysicalPosition<f64>) -> Option<(Point, ScreenRect)> {
+    let display = macos::screen::display_at((cursor.x, cursor.y))?;
+    let logical = cursor.to_logical::<f64>(display.scale);
 
-    PopupLogicalSize::new(
-        target.width.min(available_width).max(1.0),
-        target.height.min(available_height).max(1.0),
-    )
+    Some((
+        Point {
+            x: logical.x,
+            y: logical.y,
+        },
+        display.work_area,
+    ))
 }
 
-fn popup_logical_to_physical_size(
-    logical: PopupLogicalSize,
-    scale_factor: f64,
-) -> PhysicalSize<u32> {
-    let scale_factor = scale_factor.max(1.0);
-    PhysicalSize::new(
-        (logical.width * scale_factor).ceil().max(1.0) as u32,
-        (logical.height * scale_factor).ceil().max(1.0) as u32,
-    )
-}
+/// Run a transition from the panel state machine against the real window.
+pub(crate) fn apply_panel(app: &tauri::AppHandle, transition: trigger::panel::Transition) {
+    let state = app.state::<AppState>();
+    let guard = state
+        .panel_window
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-fn popup_position_for_cursor_with_size(
-    cursor: PhysicalPosition<f64>,
-    size: PhysicalSize<u32>,
-    work_area_position: PhysicalPosition<i32>,
-    work_area_size: PhysicalSize<u32>,
-) -> PhysicalPosition<i32> {
-    let mut x = cursor.x + POPUP_CURSOR_OFFSET_X;
-    let mut y = cursor.y + POPUP_CURSOR_OFFSET_Y;
-
-    let left = work_area_position.x as f64 + POPUP_SCREEN_MARGIN;
-    let top = work_area_position.y as f64 + POPUP_SCREEN_MARGIN;
-    let right = work_area_position.x as f64 + work_area_size.width as f64 - POPUP_SCREEN_MARGIN;
-    let bottom = work_area_position.y as f64 + work_area_size.height as f64 - POPUP_SCREEN_MARGIN;
-    let width = size.width as f64;
-    let height = size.height as f64;
-
-    if x + width > right {
-        x = cursor.x - width - POPUP_CURSOR_OFFSET_X;
+    match guard.as_ref() {
+        Some(window) => window.apply(transition),
+        None => log::warn!("[panel] No panel window, dropping {transition:?}"),
     }
-    if y + height > bottom {
-        y = cursor.y - height - POPUP_CURSOR_OFFSET_Y;
-    }
-
-    x = x.max(left).min((right - width).max(left));
-    y = y.max(top).min((bottom - height).max(top));
-
-    PhysicalPosition::new(x.round() as i32, y.round() as i32)
 }
 
-fn show_popup_at_cursor_with_size(
+/// Show the result card beside the pointer, with no point to click first.
+///
+/// What a middle click and the keyboard shortcut do: the user has already asked
+/// for a translation, so the card goes up immediately and the loading state is
+/// visible while it is fetched.
+fn show_translation_card(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
+    let Some((pointer, work_area)) = pointer_and_display(cursor) else {
+        log::warn!("[panel] Could not work out which display the pointer is on");
+        return;
+    };
+
+    let now = mouse::listener::now_millis();
+
+    let transition = {
+        let state = app.state::<AppState>();
+        let mut panel = state
+            .trigger_panel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        panel.show_card(pointer, work_area, now)
+    };
+
+    apply_panel(app, transition);
+    let _ = app.emit("translation-started", ());
+}
+
+/// Show the trigger point for a selection, instead of translating it.
+///
+/// The point is the whole point: nothing is translated until it is clicked, so
+/// selecting text never costs a request, and a trackpad user — who has no middle
+/// button — has something to click.
+fn show_trigger_point(
     app: &tauri::AppHandle,
     cursor: PhysicalPosition<f64>,
-    target_size: PopupLogicalSize,
+    bounds: Option<ScreenRect>,
+    text: String,
 ) {
-    if let Some(window) = app.get_webview_window("popup") {
-        let (logical_size, popup_pos) = match window
-            .monitor_from_point(cursor.x, cursor.y)
-            .ok()
-            .flatten()
-        {
-            Some(monitor) => {
-                let work_area = monitor.work_area();
-                let logical_size =
-                    clamp_popup_logical_size(target_size, work_area.size, monitor.scale_factor());
-                let physical_size =
-                    popup_logical_to_physical_size(logical_size, monitor.scale_factor());
-                let popup_pos = popup_position_for_cursor_with_size(
-                    cursor,
-                    physical_size,
-                    work_area.position,
-                    work_area.size,
-                );
-                (logical_size, popup_pos)
-            }
-            None => {
-                let logical_size = target_size;
-                let popup_pos = PhysicalPosition::new(
-                    (cursor.x + POPUP_CURSOR_OFFSET_X).round() as i32,
-                    (cursor.y + POPUP_CURSOR_OFFSET_Y).round() as i32,
-                );
-                (logical_size, popup_pos)
-            }
+    let Some((pointer, work_area)) = pointer_and_display(cursor) else {
+        log::warn!("[panel] Could not work out which display the pointer is on");
+        return;
+    };
+
+    let now = mouse::listener::now_millis();
+
+    // Which rectangle the point is placed against is worth saying out loud: a
+    // point in an unexpected place is the first symptom of an app answering with
+    // the bounds of the whole page rather than of the selection.
+    let rect = trigger::panel::anchor_rect(bounds, pointer, work_area);
+    log::info!(
+        "[panel] Anchoring the trigger point to the {}",
+        if rect.width > 0.0 {
+            "selection"
+        } else {
+            "pointer (no usable selection rectangle)"
+        }
+    );
+
+    let transition = {
+        let state = app.state::<AppState>();
+        let mut panel = state
+            .trigger_panel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        panel.show_point(rect, work_area, text, now)
+    };
+
+    apply_panel(app, transition);
+    let _ = app.emit("trigger-point", ());
+
+    // An unclicked point goes away on its own. The deadline is checked against
+    // the point's own age, so this timer cannot take down a card that has since
+    // replaced it.
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(trigger::panel::POINT_TTL).await;
+        let transition = {
+            let state = handle.state::<AppState>();
+            let mut panel = state
+                .trigger_panel
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            panel.expire_point(mouse::listener::now_millis())
         };
+        apply_panel(&handle, transition);
+    });
+}
 
-        let _ = window.set_size(tauri::Size::Logical(LogicalSize::new(
-            logical_size.width,
-            logical_size.height,
-        )));
-        log::info!(
-            "[pipeline] Showing popup at ({}, {}), logical_size=({:.0}, {:.0})",
-            popup_pos.x,
-            popup_pos.y,
-            logical_size.width,
-            logical_size.height
-        );
-        let _ = window.set_position(tauri::Position::Physical(popup_pos));
-        let _ = window.show();
+/// Hide the trigger point or the card, whichever is showing.
+pub(crate) fn dismiss_panel(app: &tauri::AppHandle) {
+    let transition = {
+        let state = app.state::<AppState>();
+        let mut panel = state
+            .trigger_panel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        panel.hide()
+    };
+    apply_panel(app, transition);
+}
+
+/// Hide the trigger point because of something the user did in another app.
+///
+/// The position is what keeps a click *on* the point from being read as a click
+/// away from it: the tap sees that click first, and would otherwise take the
+/// point down a moment before the panel's own click handler could open it.
+fn dismiss_panel_at(
+    app: &tauri::AppHandle,
+    reason: trigger::reducer::DismissReason,
+    position: Option<(f64, f64)>,
+) {
+    let at = position.map(|(x, y)| Point { x, y });
+
+    let transition = {
+        let state = app.state::<AppState>();
+        let mut panel = state
+            .trigger_panel
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        panel.dismiss_point(at)
+    };
+
+    // Either nothing was showing, or the click was meant for the panel itself.
+    // The snapshot goes out either way: the diagnostics panel is showing what the
+    // tap saw, and this event is part of that whether or not it changed anything.
+    if transition == trigger::panel::Transition::None {
+        emit_mouse_trigger_state(app);
+        return;
     }
-}
 
-pub(crate) fn show_popup_at_cursor(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
-    show_popup_at_cursor_with_size(
-        app,
-        cursor,
-        PopupLogicalSize::new(POPUP_TRANSLATION_WIDTH, POPUP_TRANSLATION_HEIGHT),
-    );
-}
+    log::info!("[panel] Dismissed the trigger point: {}", reason.describe());
+    apply_panel(app, transition);
 
-pub(crate) fn show_ocr_popup_at_cursor(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>) {
-    show_popup_at_cursor_with_size(
-        app,
-        cursor,
-        PopupLogicalSize::new(POPUP_OCR_WIDTH, POPUP_OCR_HEIGHT),
+    let state = app.state::<AppState>();
+    mouse::listener::mark_pipeline_result(
+        &state.mouse_trigger_state,
+        format!("已收起：{}", reason.describe()),
+        None,
     );
+    emit_mouse_trigger_state(app);
 }
 
 fn show_popup_error(app: &tauri::AppHandle, cursor: PhysicalPosition<f64>, message: String) {
-    show_popup_at_cursor(app, cursor);
+    show_translation_card(app, cursor);
     let _ = app.emit("translation-error", message);
 }
 
-pub(crate) fn emit_mouse_trigger_state(app: &tauri::AppHandle) {
+fn emit_mouse_trigger_state(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
         let snapshot = mouse::listener::snapshot(&state.mouse_trigger_state);
         let _ = app.emit("mouse-trigger-state", snapshot);
@@ -235,15 +353,6 @@ fn text_hash(text: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     text.hash(&mut hasher);
     hasher.finish()
-}
-
-fn translate_error_kind(error: &TranslateError) -> &'static str {
-    match error {
-        TranslateError::Network(_) => "network",
-        TranslateError::Api(_) => "api",
-        TranslateError::RateLimited => "rate_limited",
-        TranslateError::Config(_) => "config",
-    }
 }
 
 fn apply_log_level(debug_logging: bool) {
@@ -260,136 +369,23 @@ fn install_panic_hook() {
     }));
 }
 
-fn capture_delay_for_source(source: TriggerSource) -> Duration {
-    match source {
-        TriggerSource::KeyboardShortcut => KEYBOARD_SHORTCUT_CAPTURE_DELAY,
-        TriggerSource::MouseMiddle
-        | TriggerSource::MouseSelection
-        | TriggerSource::OcrShortcut
-        | TriggerSource::Test => Duration::ZERO,
-    }
-}
-
-fn macos_accessibility_error(trusted: bool) -> Option<&'static str> {
-    if trusted {
-        None
-    } else {
-        Some(MACOS_ACCESSIBILITY_PERMISSION_MESSAGE)
-    }
-}
-
-fn translation_payload(
-    text: String,
-    result: translate::provider::TranslateResult,
-    popup_anchor: PhysicalPosition<f64>,
-    capture: CaptureMetadata,
-) -> serde_json::Value {
-    let capture_source = match capture {
-        CaptureMetadata::Clipboard => "clipboard",
-        CaptureMetadata::Ocr { .. } => "ocr",
-    };
-    let mut payload = serde_json::json!({
-        "original": text,
-        "result": result,
-        "cursor_x": popup_anchor.x,
-        "cursor_y": popup_anchor.y,
-        "capture_source": capture_source,
-    });
-    if let CaptureMetadata::Ocr {
-        backend,
-        elapsed_ms,
-    } = capture
-    {
-        payload["ocr_backend"] = serde_json::json!(backend);
-        payload["ocr_elapsed_ms"] = serde_json::json!(elapsed_ms);
-    }
-    payload
-}
-
-pub async fn translate_and_emit(
-    app: tauri::AppHandle,
-    text: String,
-    popup_anchor: PhysicalPosition<f64>,
-    capture: CaptureMetadata,
-) {
-    let state = app.state::<AppState>();
-    let (source_lang, target_lang) = {
-        let config = state.config.lock().unwrap();
-        (config.source_lang.clone(), config.target_lang.clone())
-    };
-
-    let engine = state.translation_engine.read().await;
-    match engine.translate(&text, &source_lang, &target_lang).await {
-        Ok(result) => {
-            let capture_source = match capture {
-                CaptureMetadata::Clipboard => "clipboard",
-                CaptureMetadata::Ocr { .. } => "ocr",
-            };
-            let success_message = format!(
-                "Success: translated {} chars from {} with {}",
-                text.chars().count(),
-                capture_source,
-                result.provider
-            );
-            if matches!(capture, CaptureMetadata::Clipboard) {
-                state.history.add(history::HistoryEntry {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    timestamp: chrono::Utc::now().timestamp(),
-                    original: text.clone(),
-                    translated: result.translated.clone(),
-                    source_lang: result.source_lang.clone(),
-                    target_lang: result.target_lang.clone(),
-                    provider: result.provider.clone(),
-                });
-            }
-
-            let payload = translation_payload(text, result, popup_anchor, capture);
-            let _ = app.emit("translation-ready", payload);
-            mouse::listener::mark_pipeline_result(
-                &state.mouse_trigger_state,
-                success_message,
-                None,
-            );
-            emit_mouse_trigger_state(&app);
-        }
-        Err(e) => {
-            let error_kind = translate_error_kind(&e);
-            log::error!("[pipeline] Translation error kind={}", error_kind);
-            let _ = app.emit("translation-error", e.to_string());
-            mouse::listener::mark_pipeline_result(
-                &state.mouse_trigger_state,
-                "Failed: translation error",
-                Some(format!("Translation error kind: {}", error_kind)),
-            );
-            emit_mouse_trigger_state(&app);
-        }
-    }
-}
-
 /// Shared translation pipeline: capture clipboard, translate, show popup.
 async fn run_translation_pipeline(
     app: tauri::AppHandle,
     cm: Arc<clipboard::manager::ClipboardManager>,
-    running: Arc<AtomicBool>,
+    gate: Arc<pipeline::PipelineGate>,
     source: TriggerSource,
 ) {
     let is_selection_source = source == TriggerSource::MouseSelection;
-    if running
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        log::info!("[pipeline] Previous pipeline still running, skipping trigger");
-        if let Some(state) = app.try_state::<AppState>() {
-            mouse::listener::mark_pipeline_result(
-                &state.mouse_trigger_state,
-                "Skipped: previous pipeline still running",
-                None,
-            );
+
+    // Held until the answer is on screen, or handed on to `translate_and_show`.
+    let guard = match acquire_pipeline_gate(&app, &gate) {
+        Some(guard) => guard,
+        None => {
             emit_mouse_trigger_state(&app);
+            return;
         }
-        return;
-    }
-    let _guard = PipelineGuard { running };
+    };
 
     log::info!(
         "[pipeline] Translation pipeline triggered from {:?}",
@@ -411,7 +407,7 @@ async fn run_translation_pipeline(
             log::info!("[pipeline] Disabled, skipping");
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
-                "Skipped: fk-trans disabled",
+                "已跳过：fk-trans 已关闭",
                 None,
             );
             emit_mouse_trigger_state(&app);
@@ -433,7 +429,7 @@ async fn run_translation_pipeline(
             let state = app.state::<AppState>();
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
-                "Skipped: selection trigger ignored because provider is not ready",
+                "已跳过：翻译服务未就绪，忽略划词触发",
                 Some(reason),
             );
             emit_mouse_trigger_state(&app);
@@ -443,295 +439,158 @@ async fn run_translation_pipeline(
         show_popup_error(
             &app,
             cursor_pos,
-            "No available translation provider. Configure one in Settings.".to_string(),
+            "没有可用的翻译服务，请到设置里配置一个。".to_string(),
         );
         let state = app.state::<AppState>();
         mouse::listener::mark_pipeline_result(
             &state.mouse_trigger_state,
-            "Failed: no available translation provider",
+            "失败：没有可用的翻译服务",
             Some(reason),
         );
         emit_mouse_trigger_state(&app);
         return;
     }
 
-    #[cfg(target_os = "macos")]
-    if let Some(message) =
-        macos_accessibility_error(platform::macos::check_accessibility_permissions())
-    {
-        log::warn!("[pipeline] Accessibility permission missing before clipboard capture");
-        let _ = platform::macos::request_accessibility_permissions();
-        let state = app.state::<AppState>();
-        if is_selection_source {
-            mouse::listener::mark_pipeline_result(
-                &state.mouse_trigger_state,
-                "Skipped: selection trigger ignored because Accessibility permission is missing",
-                Some(message.to_string()),
-            );
-            emit_mouse_trigger_state(&app);
-            return;
-        }
+    if !is_selection_source {
+        // An explicit trigger gets a visible loading state before the capture,
+        // which can take a moment: without it a slow or failing capture is
+        // indistinguishable from the app ignoring the click.
+        show_translation_card(&app, cursor_pos);
+    }
 
-        show_popup_error(&app, cursor_pos, message.to_string());
+    // The strategy chain does its own waiting: it lets the app settle after the
+    // mouse-up, bounds each attempt, and decides whether the pasteboard fallback
+    // is worth trying. Reading a selection before the app has finished making it
+    // is the main reason the old capture was unreliable.
+    //
+    // A selection trigger allows no pasteboard fallback: this run only decides
+    // whether to offer a trigger point, and synthesising Cmd+C to find that out
+    // would take over the user's clipboard for a translation they have not asked
+    // for yet. The fallback happens on the click, when they have.
+    log::info!("[pipeline] Capturing selected text...");
+    let state = app.state::<AppState>();
+    let capture = capture::capture_selection(&cm, !is_selection_source).await;
+    let capture_note = capture.summary();
+    log::info!("[pipeline] Capture: {capture_note}");
+
+    if is_selection_source {
+        // The point appears whether or not the text could be read, and whatever
+        // was read is carried to the click. An app that will not describe its
+        // selection — every terminal — is exactly the case the pasteboard
+        // fallback exists for, and that fallback only becomes fair game once the
+        // user has asked for a translation. So it happens then, not now.
+        let (text, bounds) = match capture.captured {
+            Some(captured) => (captured.text, captured.bounds),
+            None => (String::new(), None),
+        };
+        let char_count = text.chars().count();
+
+        show_trigger_point(&app, cursor_pos, bounds, text);
+
         mouse::listener::mark_pipeline_result(
             &state.mouse_trigger_state,
-            "Failed: accessibility permission missing",
-            Some(message.to_string()),
+            if char_count > 0 {
+                format!("就绪：已选中 {char_count} 个字符，等待点击触发点")
+            } else {
+                "就绪：等点击触发点（此刻还读不到选中的文字）".to_string()
+            },
+            Some(capture_note),
         );
         emit_mouse_trigger_state(&app);
         return;
     }
 
-    let capture_delay = if is_selection_source {
-        SELECTION_CAPTURE_SETTLE_DELAY
-    } else {
-        capture_delay_for_source(source)
-    };
-    if !capture_delay.is_zero() {
-        log::debug!(
-            "[pipeline] Waiting {} ms before clipboard capture",
-            capture_delay.as_millis()
+    let Some(captured) = capture.captured else {
+        log::warn!("[pipeline] No text captured, skipping: {capture_note}");
+        let _ = app.emit(
+            "translation-error",
+            "没有取到选中的文字，请先在别的应用里选中文字再试。".to_string(),
         );
-        sleep(capture_delay).await;
-    }
-
-    log::info!("[pipeline] Capturing selected text...");
-    let text = match timeout(CLIPBOARD_CAPTURE_TIMEOUT, cm.capture_selected_text()).await {
-        Ok(Ok(t)) => {
-            log::info!(
-                "[pipeline] Captured text: chars={} hash={:016x}",
-                t.chars().count(),
-                text_hash(&t)
-            );
-            t
-        }
-        Ok(Err(error)) => {
-            let user_message = error.user_message();
-            let diagnostic_reason = error.diagnostic_reason();
-            log::warn!("[pipeline] Clipboard capture failed: {}", diagnostic_reason);
-            let state = app.state::<AppState>();
-            if is_selection_source {
-                mouse::listener::mark_pipeline_result(
-                    &state.mouse_trigger_state,
-                    "Ignored: selection drag produced no captured text",
-                    Some(diagnostic_reason),
-                );
-                emit_mouse_trigger_state(&app);
-                return;
-            }
-
-            show_popup_error(&app, cursor_pos, user_message);
-            mouse::listener::mark_pipeline_result(
-                &state.mouse_trigger_state,
-                "Failed: no selected text captured",
-                Some(diagnostic_reason),
-            );
-            emit_mouse_trigger_state(&app);
-            return;
-        }
-        Err(_) => {
-            log::error!(
-                "[pipeline] Clipboard capture timed out after {} ms",
-                CLIPBOARD_CAPTURE_TIMEOUT.as_millis()
-            );
-            let state = app.state::<AppState>();
-            if is_selection_source {
-                mouse::listener::mark_pipeline_result(
-                    &state.mouse_trigger_state,
-                    "Ignored: selection clipboard capture timed out",
-                    Some("Clipboard capture timeout".to_string()),
-                );
-                emit_mouse_trigger_state(&app);
-                return;
-            }
-
-            show_popup_error(
-                &app,
-                cursor_pos,
-                "Clipboard capture timed out. Try again after selecting text in the target app."
-                    .to_string(),
-            );
-            mouse::listener::mark_pipeline_result(
-                &state.mouse_trigger_state,
-                "Failed: clipboard capture timed out",
-                Some("Clipboard capture timeout".to_string()),
-            );
-            emit_mouse_trigger_state(&app);
-            return;
-        }
+        mouse::listener::mark_pipeline_result(
+            &state.mouse_trigger_state,
+            "失败：没有取到选中的文字",
+            Some(capture_note),
+        );
+        emit_mouse_trigger_state(&app);
+        return;
     };
 
-    show_popup_at_cursor(&app, cursor_pos);
-    let _ = app.emit("translation-started", ());
+    let text = captured.text;
+    log::info!(
+        "[pipeline] Captured text via {}: chars={} hash={:016x}",
+        captured.strategy.label(),
+        text.chars().count(),
+        text_hash(&text)
+    );
 
-    translate_and_emit(app, text, cursor_pos, CaptureMetadata::Clipboard).await;
+    translate_and_show(&app, text, guard).await;
 }
 
-fn validate_ocr_start_with_platform(
-    config: &AppConfig,
-    platform_ready: bool,
-    screen_recording_ready: bool,
-) -> Result<(), String> {
-    if !config.enabled {
-        return Err("fk-trans is disabled".to_string());
-    }
-    if !config.ocr_enabled {
-        return Err("OCR shortcut is disabled".to_string());
-    }
-    if !platform_ready {
-        return Err("OCR is only implemented on macOS in this version".to_string());
-    }
-    if !screen_recording_ready {
-        return Err(MACOS_SCREEN_RECORDING_PERMISSION_MESSAGE.to_string());
-    }
-    Ok(())
-}
+/// Translate `text` and put the answer on screen.
+///
+/// Every trigger ends up here with the text already in hand, whether it came from
+/// a capture or from a trigger point the user clicked.
+pub(crate) async fn translate_and_show(
+    app: &tauri::AppHandle,
+    text: String,
+    // Held for the whole translation and not read: the gate has to stay claimed
+    // until the answer is on screen, or a second trigger could start a
+    // translation on top of this one.
+    _gate: GateGuard,
+) {
+    let state = app.state::<AppState>();
 
-async fn start_ocr_selection_pipeline(app: tauri::AppHandle, running: Arc<AtomicBool>) {
-    if running
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        log::info!("[ocr] Previous pipeline still running, skipping OCR trigger");
-        if let Some(state) = app.try_state::<AppState>() {
-            state
-                .ocr_runtime
-                .mark_result("OCR skipped: previous pipeline still running", None);
+    let (source_lang, target_lang) = {
+        let config = state
+            .config
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (config.source_lang.clone(), config.target_lang.clone())
+    };
+
+    let engine = state.translation_engine.read().await;
+    match engine.translate(&text, &source_lang, &target_lang).await {
+        Ok(result) => {
+            let success_message = format!(
+                "成功：用 {} 翻译了 {} 个字符",
+                result.provider,
+                text.chars().count()
+            );
+            state.history.add(history::HistoryEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                timestamp: chrono::Utc::now().timestamp(),
+                original: text.clone(),
+                translated: result.translated.clone(),
+                source_lang: result.source_lang.clone(),
+                target_lang: result.target_lang.clone(),
+                provider: result.provider.clone(),
+            });
+
+            let _ = app.emit(
+                "translation-ready",
+                TranslationReadyPayload {
+                    original: text,
+                    result,
+                },
+            );
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
-                "Skipped: previous pipeline still running",
+                success_message,
                 None,
             );
-            emit_mouse_trigger_state(&app);
+            emit_mouse_trigger_state(app);
         }
-        return;
-    }
-
-    log::info!("[ocr] Cmd+Shift+O triggered");
-    let cursor_pos = current_cursor_position(&app);
-    let state = app.state::<AppState>();
-    mouse::listener::mark_pipeline_triggered(
-        &state.mouse_trigger_state,
-        TriggerSource::OcrShortcut,
-    );
-    emit_mouse_trigger_state(&app);
-
-    #[cfg(target_os = "macos")]
-    let screen_recording_ready = platform::macos::check_screen_recording_permissions();
-    #[cfg(not(target_os = "macos"))]
-    let screen_recording_ready = false;
-
-    let readiness = {
-        let config = state.config.lock().unwrap();
-        validate_ocr_start_with_platform(&config, cfg!(target_os = "macos"), screen_recording_ready)
-    };
-    if let Err(reason) = readiness {
-        log::warn!("[ocr] OCR start skipped: {}", reason);
-        if !screen_recording_ready {
-            #[cfg(target_os = "macos")]
-            {
-                let _ = platform::macos::request_screen_recording_permissions();
-            }
-            state.ocr_runtime.mark_screen_capture_error(reason.clone());
-        } else {
-            state.ocr_runtime.mark_error(reason.clone());
-        }
-        show_popup_error(&app, cursor_pos, reason.clone());
-        mouse::listener::mark_pipeline_result(
-            &state.mouse_trigger_state,
-            "Failed: OCR unavailable",
-            Some(reason),
-        );
-        emit_mouse_trigger_state(&app);
-        running.store(false, Ordering::SeqCst);
-        return;
-    }
-
-    let payload = match state.ocr_runtime.start_selection_session(cursor_pos) {
-        Ok(payload) => payload,
         Err(error) => {
-            log::warn!("[ocr] Screen capture failed: {}", error);
-            show_popup_error(
-                &app,
-                cursor_pos,
-                "Screen capture failed. Check macOS Screen Recording permission.".to_string(),
-            );
+            log::error!("[pipeline] Translation error kind={}", error.kind());
+            let _ = app.emit("translation-error", error.to_string());
             mouse::listener::mark_pipeline_result(
                 &state.mouse_trigger_state,
-                "Failed: OCR screen capture failed",
-                Some(error),
+                "失败：翻译出错",
+                Some(format!("Translation error kind: {}", error.kind())),
             );
-            emit_mouse_trigger_state(&app);
-            running.store(false, Ordering::SeqCst);
-            return;
+            emit_mouse_trigger_state(app);
         }
-    };
-
-    let Some(window) = app.get_webview_window("ocr-select") else {
-        let error = "OCR selection window is unavailable".to_string();
-        state.ocr_runtime.mark_error(error.clone());
-        show_popup_error(&app, cursor_pos, error.clone());
-        mouse::listener::mark_pipeline_result(
-            &state.mouse_trigger_state,
-            "Failed: OCR selection window unavailable",
-            Some(error),
-        );
-        emit_mouse_trigger_state(&app);
-        running.store(false, Ordering::SeqCst);
-        return;
-    };
-
-    let _ = window.set_position(tauri::Position::Physical(PhysicalPosition::new(
-        payload.monitor_x,
-        payload.monitor_y,
-    )));
-    let _ = window.set_size(tauri::Size::Physical(PhysicalSize::new(
-        payload.monitor_width,
-        payload.monitor_height,
-    )));
-    let _ = window.show();
-    let _ = window.set_focus();
-    #[cfg(target_os = "macos")]
-    platform::macos::focus_window(&window);
-    let _ = window.emit("ocr-selection-started", payload);
-}
-
-fn ocr_shortcut() -> tauri_plugin_global_shortcut::Shortcut {
-    use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
-
-    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyO)
-}
-
-pub(crate) fn register_ocr_shortcut(app: &tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
-
-    let shortcut = ocr_shortcut();
-    let gs = app.global_shortcut();
-    if gs.is_registered(shortcut) {
-        return Ok(());
     }
-    let running = app.state::<AppState>().pipeline_running.clone();
-    gs.on_shortcut(shortcut, move |app_handle, _shortcut, event| {
-        if event.state != ShortcutState::Released {
-            return;
-        }
-
-        let app = app_handle.clone();
-        let running = running.clone();
-        tauri::async_runtime::spawn(start_ocr_selection_pipeline(app, running));
-    })
-    .map_err(|e| e.to_string())
-}
-
-pub(crate) fn unregister_ocr_shortcut(app: &tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_global_shortcut::GlobalShortcutExt;
-
-    let shortcut = ocr_shortcut();
-    let gs = app.global_shortcut();
-    if gs.is_registered(shortcut) {
-        gs.unregister(shortcut).map_err(|e| e.to_string())?;
-    }
-    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -754,29 +613,38 @@ pub fn run() {
         )
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Must be registered before `macos::panel` converts anything: `to_panel`
+        // reaches for state this plugin's own setup manages.
+        .plugin(tauri_nspanel::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_dialog::init())
+        // LaunchAgent rather than an AppleScript login item: it survives a
+        // reboot without the user's session, and it is one plist the app can
+        // remove cleanly when the toggle is turned off.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             install_panic_hook();
 
-            // Hide dock icon on macOS
-            #[cfg(target_os = "macos")]
             {
-                platform::macos::set_accessory_activation_policy(app.handle());
+                macos::window::set_accessory_activation_policy(app.handle());
 
-                if !platform::macos::check_accessibility_permissions() {
+                if !macos::permission::is_granted() {
                     log::warn!(
                         "Accessibility permissions not granted. Mouse listener may not work."
                     );
-                    let _ = platform::macos::request_accessibility_permissions();
+                    let _ = macos::permission::request();
                 }
             }
 
             // Initialize state
-            let config = config::load_config();
+            let config::ConfigLoad {
+                config,
+                problem: config_load_problem,
+                notices: config_notices,
+            } = config::load_config();
             apply_log_level(config.debug_logging);
             log::info!(
                 "[logging] Debug logging {}, max_file_size={} bytes, rotated_files_kept={}",
@@ -790,12 +658,23 @@ pub fn run() {
             );
             let active_provider = config.active_provider.clone();
             let provider_configs = config.providers.clone();
-            let ocr_enabled = config.ocr_enabled;
             let mouse_trigger_state = mouse::listener::new_shared_state_with_options(
                 config.mouse_trigger_button,
                 config.selection_trigger_enabled,
             );
-            let pipeline_running = Arc::new(AtomicBool::new(false));
+
+            let pipeline_gate = Arc::new(pipeline::PipelineGate::default());
+
+            // Shared clipboard manager. It lives in the app state rather than in
+            // a closure because the click on the trigger point needs it too.
+            let clipboard_manager = Arc::new(clipboard::manager::ClipboardManager::new());
+
+            // The popup becomes a real panel before anything can show it, so no
+            // window is ever on screen in the state that activates the app.
+            let panel_window = macos::panel::TriggerPanelWindow::adopt(app.handle());
+            if panel_window.is_none() {
+                log::warn!("[panel] Running with a plain popup window; it will steal focus");
+            }
 
             app.manage(AppState {
                 config: Mutex::new(config),
@@ -806,25 +685,19 @@ pub fn run() {
                 history: HistoryStore::new(),
                 mouse_listener: Mutex::new(None),
                 mouse_trigger_state: mouse_trigger_state.clone(),
-                ocr_runtime: ocr::OcrRuntime::new(),
-                pipeline_running: pipeline_running.clone(),
+                pipeline_gate: pipeline_gate.clone(),
+                config_load_problem,
+                config_notices,
+                clipboard: clipboard_manager.clone(),
+                trigger_panel: Mutex::new(trigger::panel::Panel::new()),
+                trigger_panel_active: panel_window.is_some(),
+                panel_window: Mutex::new(panel_window),
             });
 
             // Create system tray
             if let Err(e) = tray::menu::create_tray(app.handle()) {
                 log::error!("[tray] Failed to create tray: {}", e);
             }
-
-            // Configure popup window as non-activating on macOS
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(popup) = app.get_webview_window("popup") {
-                    platform::macos::configure_popup_window(&popup);
-                }
-            }
-
-            // Shared clipboard manager
-            let clipboard_manager = Arc::new(clipboard::manager::ClipboardManager::new());
 
             // --- Mouse listener pipeline ---
             let app_handle = app.handle().clone();
@@ -841,32 +714,36 @@ pub fn run() {
 
             let app_handle_clone = app_handle.clone();
             let clipboard_clone = clipboard_manager.clone();
-            let mouse_pipeline_running = pipeline_running.clone();
+            let mouse_pipeline_gate = pipeline_gate.clone();
 
             // Use a dedicated thread for receiving to avoid blocking tokio runtime
             std::thread::spawn(move || loop {
                 match rx.recv() {
                     Ok(event) => {
                         log::info!(
-                            "[mouse] Event delivered to pipeline receiver: button={} trigger={} source={:?} ts={}",
-                            event.button,
-                            event.is_trigger,
-                            event.source,
+                            "[mouse] Event delivered: {:?} position={:?} ts={}",
+                            event.decision,
+                            event.position,
                             event.timestamp_ms
                         );
                         let app = app_handle_clone.clone();
-                        emit_mouse_trigger_state(&app);
-                        if !event.is_trigger {
-                            continue;
+
+                        match event.decision {
+                            trigger::reducer::Decision::Trigger(source) => {
+                                let cm = clipboard_clone.clone();
+                                let gate = mouse_pipeline_gate.clone();
+                                tauri::async_runtime::spawn(run_translation_pipeline(
+                                    app, cm, gate, source,
+                                ));
+                            }
+                            trigger::reducer::Decision::Dismiss(reason) => {
+                                dismiss_panel_at(&app, reason, event.position);
+                            }
+                            trigger::reducer::Decision::Quiet
+                            | trigger::reducer::Decision::Ignored(_) => {
+                                emit_mouse_trigger_state(&app);
+                            }
                         }
-                        let cm = clipboard_clone.clone();
-                        let running = mouse_pipeline_running.clone();
-                        tauri::async_runtime::spawn(run_translation_pipeline(
-                            app,
-                            cm,
-                            running,
-                            event.source,
-                        ));
                     }
                     Err(e) => {
                         log::error!("Channel error: {}", e);
@@ -881,7 +758,7 @@ pub fn run() {
             };
 
             let shortcut_cm = clipboard_manager.clone();
-            let shortcut_pipeline_running = pipeline_running.clone();
+            let shortcut_pipeline_gate = pipeline_gate.clone();
             let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyT);
             let gs = app.global_shortcut();
             match gs.on_shortcut(shortcut, move |app_handle, _shortcut, event| {
@@ -892,11 +769,11 @@ pub fn run() {
                 log::info!("[shortcut] Cmd+Shift+T triggered");
                 let app = app_handle.clone();
                 let cm = shortcut_cm.clone();
-                let running = shortcut_pipeline_running.clone();
+                let gate = shortcut_pipeline_gate.clone();
                 tauri::async_runtime::spawn(run_translation_pipeline(
                     app,
                     cm,
-                    running,
+                    gate,
                     TriggerSource::KeyboardShortcut,
                 ));
             }) {
@@ -904,21 +781,12 @@ pub fn run() {
                 Err(e) => log::error!("[shortcut] Failed to register Cmd+Shift+T: {}", e),
             }
 
-            if ocr_enabled {
-                match register_ocr_shortcut(app.handle()) {
-                    Ok(_) => log::info!("[shortcut] Cmd+Shift+O registered successfully"),
-                    Err(e) => log::error!("[shortcut] Failed to register Cmd+Shift+O: {}", e),
-                }
-            } else {
-                log::info!("[shortcut] Cmd+Shift+O not registered because OCR is disabled");
-            }
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::translation::translate_text,
             commands::translation::ai_action,
-            commands::translation::ai_action_stream,
+            commands::translation::get_languages,
             commands::translation::get_history,
             commands::translation::clear_history,
             commands::settings::get_config,
@@ -930,16 +798,36 @@ pub fn run() {
             commands::diagnostics::export_diagnostics_report,
             commands::diagnostics::reveal_diagnostics_folder,
             commands::diagnostics::open_accessibility_settings,
-            commands::diagnostics::get_macos_dev_permission_target,
-            commands::diagnostics::reveal_current_executable,
+            commands::diagnostics::reveal_executable,
             commands::diagnostics::log_frontend_event,
-            commands::ocr::get_ocr_selection_payload,
-            commands::ocr::complete_ocr_selection,
-            commands::ocr::cancel_ocr_selection,
-            commands::ocr::open_screen_recording_settings,
+            commands::trigger::expand_trigger_panel,
+            commands::trigger::resize_trigger_panel,
+            commands::trigger::dismiss_trigger_panel,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .on_window_event(|window, event| {
+            // The settings window is the only one the user can close, and closing
+            // it must not take the app with it: fk-trans lives in the menu bar,
+            // and the tray is how it comes back. Hiding it also keeps the webview
+            // alive, so reopening is instant and the drafts survive.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Closing the last window is not quitting, for the same reason: a
+            // menu-bar app with no menu bar icon would be unreachable. An
+            // explicit exit — the tray's Quit — carries a code and still runs.
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -952,135 +840,4 @@ mod tests {
         assert!(LOG_ROTATION_KEEP_FILES <= 5);
     }
 
-    #[test]
-    fn clipboard_capture_timeout_is_short() {
-        assert!(CLIPBOARD_CAPTURE_TIMEOUT <= Duration::from_secs(5));
-    }
-
-    #[test]
-    fn popup_logical_size_clamps_to_monitor_work_area() {
-        let target = PopupLogicalSize::new(POPUP_OCR_WIDTH, POPUP_OCR_HEIGHT);
-        let small_retina_work_area = PhysicalSize::new(1000, 800);
-
-        let clamped = clamp_popup_logical_size(target, small_retina_work_area, 2.0);
-        let max_width = (small_retina_work_area.width as f64 - POPUP_SCREEN_MARGIN * 2.0) / 2.0;
-        let max_height = (small_retina_work_area.height as f64 - POPUP_SCREEN_MARGIN * 2.0) / 2.0;
-
-        assert!(clamped.width <= max_width);
-        assert!(clamped.height <= max_height);
-
-        let large_retina_work_area = PhysicalSize::new(2400, 1800);
-        assert_eq!(
-            clamp_popup_logical_size(target, large_retina_work_area, 2.0),
-            target
-        );
-    }
-
-    #[test]
-    fn ocr_disabled_rejects_start_before_provider_validation() {
-        let config = AppConfig {
-            ocr_enabled: false,
-            ..AppConfig::default()
-        };
-
-        assert_eq!(
-            validate_ocr_start_with_platform(&config, true, true),
-            Err("OCR shortcut is disabled".to_string())
-        );
-    }
-
-    #[test]
-    fn ocr_requires_screen_recording_before_provider_validation() {
-        let config = AppConfig {
-            providers: vec![config::ProviderConfig {
-                name: "deeplx".to_string(),
-                base_url: "http://127.0.0.1:1188".to_string(),
-                api_key: String::new(),
-                model: String::new(),
-                system_prompt: String::new(),
-                user_prompt: String::new(),
-                extra_params: serde_json::json!({}),
-            }],
-            active_provider: "deeplx".to_string(),
-            ..AppConfig::default()
-        };
-
-        assert_eq!(
-            validate_ocr_start_with_platform(&config, true, false),
-            Err(MACOS_SCREEN_RECORDING_PERMISSION_MESSAGE.to_string())
-        );
-    }
-
-    #[test]
-    fn ocr_start_does_not_require_translation_provider() {
-        let config = AppConfig {
-            active_provider: "missing".to_string(),
-            ..AppConfig::default()
-        };
-
-        assert_eq!(
-            validate_ocr_start_with_platform(&config, true, true),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn keyboard_shortcut_waits_before_clipboard_capture() {
-        assert_eq!(
-            capture_delay_for_source(TriggerSource::KeyboardShortcut),
-            KEYBOARD_SHORTCUT_CAPTURE_DELAY
-        );
-        assert_eq!(
-            capture_delay_for_source(TriggerSource::MouseMiddle),
-            Duration::ZERO
-        );
-        assert_eq!(
-            capture_delay_for_source(TriggerSource::MouseSelection),
-            Duration::ZERO
-        );
-    }
-
-    #[test]
-    fn accessibility_error_blocks_clipboard_capture_when_missing() {
-        assert_eq!(
-            macos_accessibility_error(false),
-            Some(MACOS_ACCESSIBILITY_PERMISSION_MESSAGE)
-        );
-        assert_eq!(macos_accessibility_error(true), None);
-    }
-
-    #[test]
-    fn translation_payload_marks_clipboard_and_ocr_sources() {
-        let result = translate::provider::TranslateResult {
-            original: "hello".to_string(),
-            translated: "你好".to_string(),
-            source_lang: "en".to_string(),
-            target_lang: "zh".to_string(),
-            provider: "test".to_string(),
-            alternatives: vec![],
-        };
-        let anchor = PhysicalPosition::new(1.0, 2.0);
-
-        let clipboard = translation_payload(
-            "hello".to_string(),
-            result.clone(),
-            anchor,
-            CaptureMetadata::Clipboard,
-        );
-        let ocr = translation_payload(
-            "hello".to_string(),
-            result,
-            anchor,
-            CaptureMetadata::Ocr {
-                backend: "apple_vision",
-                elapsed_ms: 42,
-            },
-        );
-
-        assert_eq!(clipboard["capture_source"], "clipboard");
-        assert!(clipboard.get("ocr_backend").is_none());
-        assert_eq!(ocr["capture_source"], "ocr");
-        assert_eq!(ocr["ocr_backend"], "apple_vision");
-        assert_eq!(ocr["ocr_elapsed_ms"], 42);
-    }
 }
