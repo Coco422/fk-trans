@@ -38,6 +38,22 @@ export default function DiagnosticsTab() {
               <p class="text-xs text-warn">授权后需要重启 fk-trans 才会生效。</p>
             </Show>
 
+            <Show when={!diag().runningBundled}>
+              <div class="space-y-2 rounded-control bg-warn-soft p-2.5 text-xs text-warn">
+                <p>
+                  当前是开发版（直接运行的可执行文件），macOS 把它和安装好的 fk-trans.app
+                  当成两个应用，权限要单独授予。 系统设置里找不到它时，点「+」，按 ⌘⇧G
+                  粘贴下面的路径添加。
+                </p>
+                <p class="font-mono break-all opacity-90">
+                  {diag().executablePath ?? "—"}
+                </p>
+                <Button size="sm" onClick={() => void store.revealExecutable()}>
+                  在 Finder 中显示
+                </Button>
+              </div>
+            </Show>
+
             <div class="flex items-center justify-between border-t border-line pt-3">
               <div>
                 <div class="text-sm text-ink">触发点窗口</div>

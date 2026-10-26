@@ -77,6 +77,16 @@ export type DiagnosticsSnapshot = { appVersion: string, logDir: string | null, d
  */
 logMaxFileSizeBytes: number, logRotationKeepFiles: number, accessibilityTrusted: boolean, 
 /**
+ * The binary macOS grants permissions to. Shown because a dev run and the
+ * installed app are different identities to macOS.
+ */
+executablePath: string | null, 
+/**
+ * False for `npm run tauri dev`, whose permissions are separate from the
+ * installed app's.
+ */
+runningBundled: boolean, 
+/**
  * False means the popup is a plain window and clicking the trigger point
  * will activate the app — which usually destroys the selection being read.
  */

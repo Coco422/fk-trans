@@ -121,6 +121,14 @@ function createStore() {
     }
   }
 
+  async function revealExecutable() {
+    try {
+      await api.revealExecutable();
+    } catch (error) {
+      setMessage(`打开失败：${describeError(error)}`);
+    }
+  }
+
   async function exportDiagnostics() {
     try {
       const result = await api.exportDiagnosticsReport();
@@ -201,6 +209,7 @@ function createStore() {
     startMouseTest,
     saveLastMouseButton,
     openAccessibilitySettings,
+    revealExecutable,
     exportDiagnostics,
     revealDiagnosticsFolder,
     start,

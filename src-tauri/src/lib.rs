@@ -798,6 +798,7 @@ pub fn run() {
             commands::diagnostics::export_diagnostics_report,
             commands::diagnostics::reveal_diagnostics_folder,
             commands::diagnostics::open_accessibility_settings,
+            commands::diagnostics::reveal_executable,
             commands::diagnostics::log_frontend_event,
             commands::trigger::expand_trigger_panel,
             commands::trigger::resize_trigger_panel,

@@ -34,6 +34,12 @@ pub struct DiagnosticsSnapshot {
     pub log_max_file_size_bytes: u64,
     pub log_rotation_keep_files: usize,
     pub accessibility_trusted: bool,
+    /// The binary macOS grants permissions to. Shown because a dev run and the
+    /// installed app are different identities to macOS.
+    pub executable_path: Option<String>,
+    /// False for `npm run tauri dev`, whose permissions are separate from the
+    /// installed app's.
+    pub running_bundled: bool,
     /// False means the popup is a plain window and clicking the trigger point
     /// will activate the app — which usually destroys the selection being read.
     pub trigger_panel_active: bool,
@@ -325,6 +331,10 @@ fn current_snapshot(app: &AppHandle, state: &AppState) -> DiagnosticsSnapshot {
         log_max_file_size_bytes: crate::LOG_MAX_FILE_SIZE_BYTES,
         log_rotation_keep_files: crate::LOG_ROTATION_KEEP_FILES,
         accessibility_trusted: mouse.accessibility_trusted,
+        executable_path: crate::macos::permission::current_executable()
+            .map(|path| path.display().to_string()),
+        running_bundled: crate::macos::permission::current_executable()
+            .is_some_and(|path| crate::macos::permission::is_bundled(&path)),
         trigger_panel_active: state.trigger_panel_active,
         mouse,
         active_provider_ready: active_readiness.is_ok(),
@@ -387,6 +397,11 @@ pub fn reveal_diagnostics_folder(app: AppHandle) -> Result<(), String> {
     std::fs::create_dir_all(&log_dir)
         .map_err(|e| format!("Failed to create log directory: {}", e))?;
     open_path(&log_dir)
+}
+
+#[tauri::command]
+pub fn reveal_executable() -> Result<(), String> {
+    crate::macos::permission::reveal_executable()
 }
 
 #[tauri::command]

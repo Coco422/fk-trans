@@ -141,6 +141,11 @@ export function revealDiagnosticsFolder(): Promise<void> {
   return call<void>("reveal_diagnostics_folder");
 }
 
+/** Show the running executable in Finder, for adding to Accessibility by hand. */
+export function revealExecutable(): Promise<void> {
+  return call<void>("reveal_executable");
+}
+
 export function openAccessibilitySettings(): Promise<void> {
   return call<void>("open_accessibility_settings");
 }

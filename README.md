@@ -70,5 +70,6 @@ CI 会检查生成的 `src/api/types.ts` 是否与 Rust 一致。
 
 - [docs/architecture.md](docs/architecture.md) — 代码怎么分层，一次翻译经过哪些地方
 - [docs/local-models.md](docs/local-models.md) — 本地模型（Ollama）的推荐与实测
+- [docs/development.md](docs/development.md) — 开发版的权限问题
 - [docs/release.md](docs/release.md) — 打包发布流程
 - [NOTICE](NOTICE) — 第三方依赖与借鉴来源
